@@ -126,6 +126,14 @@ float velDampFromSnapback(const int snapback){
 float _smoothingMin = 0.0;
 float _smoothingMax = 0.9;
 
+//Valuse used for applying hysteresis to suppress jitter
+float _aHystValX = 0.3;
+float _aHystValY = 0.3;
+float _cHystValX = 0.3;
+float _cHystValY = 0.3;
+const float _hystValMin = 0;
+const float _hystValMax = 0.9;
+
 //New snapback Kalman filter parameters.
 struct FilterGains {
 	//What's the max stick distance from the center
@@ -240,6 +248,8 @@ float _aBoundaryAngles[_noOfNotches]; //angles at the boundaries between regions
 float _cBoundaryAngles[_noOfNotches]; //angles at the boundaries between regions of the c-stick
 float _tempCalPointsX[(_noOfNotches)*2]; //temporary storage for the x coordinate points collected during calibration before the are cleaned and put into _cleanedPointsX
 float _tempCalPointsY[(_noOfNotches)*2]; //temporary storage for the y coordinate points collected during calibration before the are cleaned and put into _cleanedPointsY
+float _tempNoiseX[(_noOfNotches)*2]; //temporary storage for the x coordinate noise collected during calibration
+float _tempNoiseY[(_noOfNotches)*2]; //temporary storage for the x coordinate noise collected during calibration
 
 //index values to store data into eeprom
 const int _bytesPerFloat = 4;
@@ -263,6 +273,10 @@ const int _eepromROffset = _eepromLOffset+_bytesPerFloat;
 const int _eepromCxSmoothing = _eepromROffset+_bytesPerFloat;
 const int _eepromCySmoothing = _eepromCxSmoothing+_bytesPerFloat;
 const int _eepromRumble = _eepromCySmoothing+_bytesPerFloat;
+const int _eepromAHystValX = _eepromRumble + _bytesPerFloat;
+const int _eepromAHystValY = _eepromAHystValX + _bytesPerFloat;
+const int _eepromCHystValX = _eepromAHystValY + _bytesPerFloat;
+const int _eepromCHystValY = _eepromCHystValX + _bytesPerFloat;
 
 Bounce bounceDr = Bounce();
 Bounce bounceDu = Bounce();
@@ -1035,21 +1049,33 @@ void readEEPROM(){
 	EEPROM.get(_eepromRumble, _rumble);
 	Serial.print("Rumble value before fixing: ");
 	Serial.println(_rumble);
-	if(std::isnan(_rumble)) {
-		_rumble = _rumbleDefault;
-	}
-	if(_rumble < _rumbleMin) {
-		_rumble = _rumbleMin;
-	}
-	if(_rumble > _rumbleMax) {
-		_rumble = _rumbleMax;
-	}
+	_rumble = checkRangeFloat(_rumble,_rumbleMin,_rumbleMax,_rumbleDefault);
 	_rumblePower = calcRumblePower(_rumble);
 	Serial.print("Rumble value: ");
 	Serial.println(_rumble);
 	Serial.print("Rumble power: ");
 	Serial.println(_rumblePower);
-
+	
+	EEPROM.get(_eepromAHystValX, _aHystValX);
+	_aHystValX = checkRangeFloat(_aHystValX,_hystValMin,_hystValMax,_hystValMin);
+	Serial.print("A Stick X axis hysteresis value: ");
+	Serial.println(_aHystValX,8);
+	
+	EEPROM.get(_eepromAHystValY, _aHystValY);
+	_aHystValY = checkRangeFloat(_aHystValY,_hystValMin,_hystValMax,_hystValMin);
+	Serial.print("A Stick X axis hysteresis value: ");
+	Serial.println(_aHystValY,8);
+	
+	EEPROM.get(_eepromCHystValX, _cHystValX);
+	_cHystValX = checkRangeFloat(_cHystValX,_hystValMin,_hystValMax,_hystValMin);
+	Serial.print("A Stick X axis hysteresis value: ");
+	Serial.println(_cHystValX,8);
+	
+	EEPROM.get(_eepromCHystValY, _cHystValY);
+	_cHystValY = checkRangeFloat(_cHystValY,_hystValMin,_hystValMax,_hystValMin);
+	Serial.print("A Stick X axis hysteresis value: ");
+	Serial.println(_cHystValY,8);
+	
 	//get the calibration points collected during the last A stick calibration
 	EEPROM.get(_eepromAPointsX, _tempCalPointsX);
 	EEPROM.get(_eepromAPointsY, _tempCalPointsY);
@@ -1519,7 +1545,7 @@ void readButtons(){
 		_advanceCalPressed = true;
 		if (!_calAStick){
 			if(_currentCalStep < _noOfCalibrationPoints){//still collecting points
-				collectCalPoints(_calAStick, _currentCalStep,_tempCalPointsX,_tempCalPointsY);
+				collectCalPoints(_calAStick, _currentCalStep,_tempCalPointsX,_tempCalPointsY,_tempNoiseX, _tempNoiseY);
 			}
 			_currentCalStep ++;
 			if(_currentCalStep >= 2 && _currentCalStep != _noOfNotches*2) {//don't undo at the beginning of collection or notch adjust
@@ -1550,10 +1576,15 @@ void readButtons(){
 				cleanNotches(_cNotchAngles, _measuredNotchAngles, _cNotchStatus);
 				//clean full cal points again again, feeding those measured angles in for missing tertiary notches
 				cleanCalPoints(_tempCalPointsX, _tempCalPointsY, _cNotchAngles, _cleanedPointsX, _cleanedPointsY, _notchPointsX, _notchPointsY, _cNotchStatus);
+				float centerX = _cleanedPointsX[0];
+				float centerY = _cleanedPointsY[0];
 				//linearize again
 				linearizeCal(_cleanedPointsX, _cleanedPointsY, _cleanedPointsX, _cleanedPointsY, _cFitCoeffsX, _cFitCoeffsY);
 				//notchCalibrate again
 				notchCalibrate(_cleanedPointsX, _cleanedPointsY, _notchPointsX, _notchPointsY, _noOfNotches, _cAffineCoeffs, _cBoundaryAngles);
+				//calculate the hysteresis value from the collected noise measurements and the most recent linearization
+				setHysteresisVals(_tempNoiseX,_tempNoiseY,centerX,centerY,_cFitCoeffsX,_cFitCoeffsY,_cHystValX,_cHystValY);
+				Serial.println("hystersis values determined");
 			}
 			int notchIndex = _notchAdjOrder[min(_currentCalStep-_noOfCalibrationPoints, _noOfAdjNotches-1)];//limit this so it doesn't access outside the array bounds
 			while((_currentCalStep >= _noOfCalibrationPoints) && (_cNotchStatus[notchIndex] == _tertiaryNotchInactive) && (_currentCalStep < _noOfCalibrationPoints + _noOfAdjNotches)){//this non-diagonal notch was not calibrated
@@ -1563,6 +1594,8 @@ void readButtons(){
 			}
 			if(_currentCalStep >= _noOfCalibrationPoints + _noOfAdjNotches){//done adjusting notches
 				Serial.println("finished adjusting notches for the C stick");
+				EEPROM.put(_eepromCHystValX,_cHystValX);
+				EEPROM.put(_eepromCHystValY,_cHystValY);
 				EEPROM.put(_eepromCPointsX,_tempCalPointsX);
 				EEPROM.put(_eepromCPointsY,_tempCalPointsY);
 				EEPROM.put(_eepromCNotchAngles,_cNotchAngles);
@@ -1580,7 +1613,7 @@ void readButtons(){
 			Serial.println("Current step:");
 			Serial.println(_currentCalStep);
 			if(_currentCalStep < _noOfCalibrationPoints){//still collecting points
-				collectCalPoints(_calAStick, _currentCalStep,_tempCalPointsX,_tempCalPointsY);
+				collectCalPoints(_calAStick, _currentCalStep,_tempCalPointsX,_tempCalPointsY,_tempNoiseX, _tempNoiseY);
 			}
 			_currentCalStep ++;
 			if(_currentCalStep >= 2 && _currentCalStep != _noOfCalibrationPoints) {//don't undo at the beginning of collection or notch adjust
@@ -1610,10 +1643,15 @@ void readButtons(){
 				cleanNotches(_aNotchAngles, _measuredNotchAngles, _aNotchStatus);
 				//clean full cal points again again, feeding those measured angles in for missing tertiary notches
 				cleanCalPoints(_tempCalPointsX, _tempCalPointsY, _aNotchAngles, _cleanedPointsX, _cleanedPointsY, _notchPointsX, _notchPointsY, _aNotchStatus);
+				float centerX = _cleanedPointsX[0];
+				float centerY = _cleanedPointsY[0];
 				//linearize again
 				linearizeCal(_cleanedPointsX, _cleanedPointsY, _cleanedPointsX, _cleanedPointsY, _aFitCoeffsX, _aFitCoeffsY);
 				//notchCalibrate again
 				notchCalibrate(_cleanedPointsX, _cleanedPointsY, _notchPointsX, _notchPointsY, _noOfNotches, _aAffineCoeffs, _aBoundaryAngles);
+				//calculate the hysteresis value from the collected noise measurements and the most recent linearization
+				setHysteresisVals(_tempNoiseX,_tempNoiseY,centerX,centerY,_aFitCoeffsX,_aFitCoeffsY,_aHystValX,_aHystValY);
+				Serial.println("hystersis values determined");
 			}
 			int notchIndex = _notchAdjOrder[min(_currentCalStep-_noOfCalibrationPoints, _noOfAdjNotches-1)];//limit this so it doesn't access outside the array bounds
 			while((_currentCalStep >= _noOfCalibrationPoints) && (_aNotchStatus[notchIndex] == _tertiaryNotchInactive) && (_currentCalStep < _noOfCalibrationPoints + _noOfAdjNotches)){//this non-diagonal notch was not calibrated
@@ -1622,7 +1660,10 @@ void readButtons(){
 				notchIndex = _notchAdjOrder[min(_currentCalStep-_noOfCalibrationPoints, _noOfAdjNotches-1)];//limit this so it doesn't access outside the array bounds
 			}
 			if(_currentCalStep >= _noOfCalibrationPoints + _noOfAdjNotches){//done adjusting notches
+				
 				Serial.println("finished adjusting notches for the A stick");
+				EEPROM.put(_eepromAHystValX,_aHystValX);
+				EEPROM.put(_eepromAHystValY,_aHystValY);
 				EEPROM.put(_eepromAPointsX,_tempCalPointsX);
 				EEPROM.put(_eepromAPointsY,_tempCalPointsY);
 				EEPROM.put(_eepromANotchAngles,_aNotchAngles);
@@ -1631,7 +1672,9 @@ void readButtons(){
 				Serial.println("calibration points cleaned");
 				linearizeCal(_cleanedPointsX, _cleanedPointsY, _cleanedPointsX, _cleanedPointsY, _aFitCoeffsX, _aFitCoeffsY);
 				Serial.println("A stick linearized");
+				
 				notchCalibrate(_cleanedPointsX, _cleanedPointsY, _notchPointsX, _notchPointsY, _noOfNotches, _aAffineCoeffs, _aBoundaryAngles);
+				
 				_currentCalStep = -1;
 				_advanceCal = false;
 			}
@@ -2178,11 +2221,11 @@ void readSticks(int readA, int readC){
 	//assign the remapped values to the button struct
 	if(readA){
 		float diffAx = (remappedAx+127.5)-btn.Ax;
-		if( (diffAx > (1.0 + hystVal)) || (diffAx < -hystVal) ){
+		if( (diffAx > (1.0 + _aHystValX)) || (diffAx < -_aHystValX) ){
 			btn.Ax = (uint8_t) (remappedAx+127.5);
 		}
 		float diffAy = (remappedAy+127.5)-btn.Ay;
-		if( (diffAy > (1.0 + hystVal)) || (diffAy < -hystVal) ){
+		if( (diffAy > (1.0 + _aHystValY)) || (diffAy < -_aHystValY) ){
 			btn.Ay = (uint8_t) (remappedAy+127.5);
 		}
 	}
@@ -2682,48 +2725,95 @@ void displayNotch(const int currentStepIn, const bool calibratingAStick, const f
 		btn.Ay = (uint8_t) (y + 127.5);
 	}
 }
-void collectCalPoints(bool aStick, int currentStepIn, float calPointsX[], float calPointsY[]){
+void collectCalPoints(bool aStick, int currentStepIn, float calPointsX[], float calPointsY[], float noiseX[], float noiseY[]){
 	Serial.print("Collecting cal point for step: ");
 	Serial.println(currentStepIn);
     const int currentStep = _calOrder[currentStepIn];
 
 	Serial.print("Cal point number: ");
 	Serial.println(currentStep);
-	float X;
-	float Y;
 
-	for(int j = 0; j < MEDIANLEN; j++){
-		X = 0;
-		Y = 0;
-		for(int i = 0; i < 128; i++){
+	const int samples = 64;
+	const float averaging = 32.0;
+	float tempX[samples] = {0};
+	float tempY[samples] = {0};
+	
+	for(int i = 0; i < samples; i++){
+		
+		for(int j = 0; j < (int)averaging; j++){
 			if(aStick){
 #ifdef USEADCSCALE
 							_ADCScale = _ADCScale*0.999 + _ADCScaleFactor/adc->adc1->analogRead(ADC_INTERNAL_SOURCE::VREF_OUT);
 #endif
 							//otherwise _ADCScale is 1
-				X += adc->adc0->analogRead(_pinAx)/4096.0*_ADCScale;
-				Y += adc->adc0->analogRead(_pinAy)/4096.0*_ADCScale;
+				tempX[i] += adc->adc0->analogRead(_pinAx)/4096.0*_ADCScale;
+				tempY[i] += adc->adc0->analogRead(_pinAy)/4096.0*_ADCScale;
 			}
 			else{
-				X += adc->adc0->analogRead(_pinCx)/4096.0;
-				Y += adc->adc0->analogRead(_pinCy)/4096.0;
+				tempX[i] += adc->adc0->analogRead(_pinCx)/4096.0;
+				tempY[i] += adc->adc0->analogRead(_pinCy)/4096.0;
 			}
 		}
-		X = X/128.0;
-		Y = Y/128.0;
-
-#ifdef USEMEDIAN
-		runMedian(X, _xPosList, _xMedianIndex);
-    runMedian(Y, _yPosList, _yMedianIndex);
-#endif
+		tempX[i] = tempX[i]/averaging;
+		tempY[i] = tempY[i]/averaging;
 	}
-
-	calPointsX[currentStep] = X;
-	calPointsY[currentStep] = Y;
+	
+	//Exclude outliers, find the second largest and second smallest values to calculate the noise
+	//first, find their indices
+	int smallestX = 0;
+	int smallX = 0;
+	int largeX = 0;
+	int largestX = 0;
+	int smallestY = 0;
+	int smallY = 0;
+	int largeY = 0;
+	int largestY = 0;
+	
+	for (int i = 0; i < samples; i++){
+		if (tempX[i] < tempX[smallestX]){//if it's the new smallest
+			smallX = smallestX;//shuffle the old smallest to small
+			smallestX = i;//record the new smallest index
+		} else if (tempX[i] < tempX[smallX]){//if it's the new second-smallest
+			smallX = i;//record the new small index
+		}
+		if (tempX[i] > tempX[largestX]){//if it's the new largest
+			largeX = largestX;//shuffle the old largest to large
+			largestX = i;//record the new largest index
+		} else if (tempX[i] > tempX[largeX]){//if it's the new second-largest
+			largeX = i;//record the new large index
+		}
+		if (tempY[i] < tempY[smallestY]){
+			smallY = smallestY;
+			smallestY = i;
+		} else if (tempY[i] < tempY[smallY]){
+			smallY = i;
+		}
+		if (tempY[i] > tempY[largestY]){
+			largeY = largestY;
+			largestY = i;
+		} else if (tempY[i] > tempY[largeY]){
+			largeY = i;
+		}
+	}
+	
+	//define the noise as the second largest value minus the second smallest value
+	noiseX[currentStep] = tempX[largeX] - tempX[smallX];
+	noiseY[currentStep] = tempY[largeY] - tempY[smallY];
+	
+	//set the calibration point to be half way inbetween the second largest value and the second smallest value (this is approximately what it will be if the hysteresis range is tight)
+	calPointsX[currentStep] = (tempX[largeX] + tempX[smallX])/2.0;
+	calPointsY[currentStep] = (tempY[largeY] + tempY[smallY])/2.0;
 
 	Serial.println("The collected coordinates are: ");
-	Serial.println(calPointsX[currentStep],8);
+	Serial.print(calPointsX[currentStep],8);
+	Serial.print(",");
 	Serial.println(calPointsY[currentStep],8);
+	
+	Serial.println("The collected noise is: ");
+	Serial.print(noiseX[currentStep],8);
+	Serial.print(",");
+	Serial.println(noiseY[currentStep],8);
+	
 }
 /*******************
 	linearizeCal
@@ -3126,4 +3216,60 @@ void cleanNotches(float notchAngles[], float measuredNotchAngles[], int notchSta
 			notchAngles[i] = measuredNotchAngles[i];
 		}
 	}
+}
+
+void setHysteresisVals(float noiseX[],float noiseY[],float centerX, float centerY, float fitCoeffsX[],float fitCoeffsY[], float &hystValX, float &hystValY){
+	hystValX = 0;
+	hystValY = 0;
+	
+	float hystExtra = 0.1;
+	
+	//Set the hysteresis value to be half the maximum noise that was recorded during point collection
+	Serial.println("the measured noise for each data point is (x,y):");
+	for(int i = 0; i < _noOfNotches*2; i++)
+	{
+		Serial.print(noiseX[i],8);
+		Serial.print(",");
+		Serial.println(noiseY[i],8);
+		
+		hystValX = max(hystValX,noiseX[i]);
+		hystValY = max(hystValY,noiseY[i]);
+	}
+	
+	
+	Serial.println("the maximum noise (x,y):");
+	Serial.print(hystValX,8);
+	Serial.print(",");
+	Serial.println(hystValY,8);
+	
+	hystValX = hystValX+centerX;
+	hystValY = hystValY+centerY;
+	
+	Serial.println("the noise fit inputs are:");
+	Serial.print(hystValX,8);
+	Serial.print(",");
+	Serial.println(hystValY,8);
+	
+	hystValX = fabs(linearize(hystValX,fitCoeffsX))/2.0 + hystExtra;
+	hystValY = fabs(linearize(hystValY,fitCoeffsY))/2.0 + hystExtra;
+	
+	//hystValX = min(hystValX,0.9);
+	//hystValY = min(hystValY,0.9);
+	
+	Serial.println("the calculated hysteresis thresholds are (x,y):");
+	Serial.print(hystValX,8);
+	Serial.print(",");
+	Serial.println(hystValY,8);
+}
+float checkRangeFloat(float value, float minVal, float maxVal, float defaultVal){
+	if(std::isnan(value)) {
+		value = defaultVal;
+	}
+	else if(value < minVal) {
+		value = minVal;
+	}
+	else if(value > maxVal) {
+		value = maxVal;
+	}
+	return value;
 }
