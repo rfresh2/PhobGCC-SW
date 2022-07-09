@@ -194,14 +194,10 @@ const int _noOfCalibrationPoints = _noOfNotches * 2;
 const int _noOfAdjNotches = 12;
 float _ADCScale = 1;
 float _ADCScaleFactor = 1;
-const int _notCalibrating = -1;
 const float _maxStickAngle = 0.67195176201;//38.5 degrees; this is the max angular deflection of the stick.
-bool	_calAStick = true; //determines which stick is being calibrated (if false then calibrate the c-stick)
-bool _advanceCal = false;
-bool _advanceCalPressed = false;
-bool _undoCal = false;
-bool _undoCalPressed = false;
-int _currentCalStep; //keeps track of which caliblration step is active, -1 means calibration is not running
+
+
+
 bool _notched = false; //keeps track of whether or not the controller has firefox notches
 const int _calibrationPoints = _noOfNotches+1; //number of calibration points for the c-stick and a-stick for a controller without notches
 float _cleanedPointsX[_noOfNotches+1]; //array to hold the x coordinates of the stick positions for calibration
@@ -278,8 +274,6 @@ ADC *adc = new ADC();
 
 unsigned int _lastMicros;
 float _dT;
-bool _running = false;
-
 
 //The median filter can be either length 3, 4, or 5.
 #define MEDIANLEN 5
@@ -397,8 +391,6 @@ void setup() {
 	#endif
 
 	readEEPROM();
-	
-	_currentCalStep = _notCalibrating;
 
 	for (int i = 0; i < MEDIANLEN; i++){
 			_xPosList[i] = 0;
@@ -463,39 +455,7 @@ void loop() {
 	//read the controllers buttons
 	handleCommands(_displayButtons,_selectButtons);
 
-	//check to see if we are calibrating
-	if(_currentCalStep >= 0){
-		if(_calAStick){
-			if(_currentCalStep >= _noOfCalibrationPoints){//adjust notch angles
-				adjustNotch(_currentCalStep, _dT, hardwareY, hardwareX, _runButtons.B, true, _measuredNotchAngles, _aNotchAngles, _aNotchStatus);
-				if(hardwareY || hardwareX || (_runButtons.B)){//only run this if the notch was adjusted
-					//clean full cal points again, feeding updated angles in
-					cleanCalPoints(_tempCalPointsX, _tempCalPointsY, _aNotchAngles, _cleanedPointsX, _cleanedPointsY, _notchPointsX, _notchPointsY, _aNotchStatus);
-					//linearize again
-					linearizeCal(_cleanedPointsX, _cleanedPointsY, _cleanedPointsX, _cleanedPointsY, _aFitCoeffsX, _aFitCoeffsY);
-					//notchCalibrate again to update the affine transform
-					notchCalibrate(_cleanedPointsX, _cleanedPointsY, _notchPointsX, _notchPointsY, _noOfNotches, _aAffineCoeffs, _aBoundaryAngles);
-				}
-			}else{//just show desired stick position
-				displayNotch(_currentCalStep, true, _notchAngleDefaults);
-			}
-		}
-		else{
-			if(_currentCalStep >= _noOfCalibrationPoints){//adjust notch angles
-				adjustNotch(_currentCalStep, _dT, hardwareY, hardwareX, _runButtons.B, false, _measuredNotchAngles, _cNotchAngles, _cNotchStatus);
-				if(hardwareY || hardwareX || (_runButtons.B)){//only run this if the notch was adjusted
-					//clean full cal points again, feeding updated angles in
-					cleanCalPoints(_tempCalPointsX, _tempCalPointsY, _cNotchAngles, _cleanedPointsX, _cleanedPointsY, _notchPointsX, _notchPointsY, _cNotchStatus);
-					//linearize again
-					linearizeCal(_cleanedPointsX, _cleanedPointsY, _cleanedPointsX, _cleanedPointsY, _cFitCoeffsX, _cFitCoeffsY);
-					//notchCalibrate again to update the affine transform
-					notchCalibrate(_cleanedPointsX, _cleanedPointsY, _notchPointsX, _notchPointsY, _noOfNotches, _cAffineCoeffs, _cBoundaryAngles);
-				}
-			}else{//just show desired stick position
-				displayNotch(_currentCalStep, false, _notchAngleDefaults);
-			}
-		}
-	}
+	
 	
 	//if not calibrating read the sticks normally
 	readSticks(true,true);
@@ -507,17 +467,34 @@ void loop() {
  * depending on the command
  */
 void handleCommands(Buttons &displayButtons,Buttons &selectButtons){
+	static unsigned int lastCommandTime = millis();
+	unsigned int loopDelta;
+
   static bool lockout = false;
   static unsigned int lockoutTimer;
+	static int currentCalStep = 0;
+	static bool advanceCal = false;
+	static bool advanceCalPressed = false;
+	static bool undoCal = false;
+	static bool undoCalPressed = false;
+
+	
+	constexpr int calibrateAStick = 1;
+	constexpr int calibrateCStick = 0;
+	static int stickToCalibrate; 
 	
 	constexpr int safeMode = 0;
 	constexpr int startMode = 1;
 	constexpr int configMode = 2;
+	constexpr int calibrateMode = 4;
 	static int controllerMode = startMode;
 	
 	constexpr int defaultLockTime = 2000;
 	
   Buttons cmdButtons;
+	
+	loopDelta = millis() - lastCommandTime;
+	lastCommandTime = millis();
 	
   if(lockout){ //freeze the outputs for a bit to display something
 		int remainingLockTime = lockoutTimer - millis();
@@ -533,7 +510,6 @@ void handleCommands(Buttons &displayButtons,Buttons &selectButtons){
 	
 	//get the true state of the digital inputs
 	readTrueButtons(cmdButtons);
-
 
 	/* Current Commands List
 	* Activate Sticks: B
@@ -573,16 +549,17 @@ void handleCommands(Buttons &displayButtons,Buttons &selectButtons){
 	* Increase/Decrease L-trigger Offset:  ZL+Du/Dd
 	* Increase/Decrease R-Trigger Offset:  ZR+Du/Dd
 	*/
-	Serial.println(controllerMode);
+	
 	switch(controllerMode){ //read different possible commands and set the outputs based on the current controller mode
 		case safeMode: //in safe mode the only thing we need to check is if the command to come out of safeMode has been entered, or if LRAS
+		{
 			//ensure selectButtons is cleared so we'll get raw outputs
 			setButtons(selectButtons,false);
 			
 			//handle the couple commands we need to worry about in safe mode
 			if(cmdButtons.A && cmdButtons.X && cmdButtons.Y && cmdButtons.S) { //Disable safe mode
 				controllerMode = configMode;
-				lockoutTimer = acknowledgeCmd(displayButtons,selectButtons,defaultLockTime);
+				lockoutTimer = acknowledgeCmd(defaultLockTime,displayButtons,selectButtons);
 				lockout = true;
 			}
 			else if(cmdButtons.L && cmdButtons.R && cmdButtons.A && cmdButtons.S) { //LRA+Start to quit a game, this is done here to make it ignore Z-Jump swap
@@ -595,272 +572,217 @@ void handleCommands(Buttons &displayButtons,Buttons &selectButtons){
 				displayButtons.S = 1;
 				
 				//short lockout to ensure the output is read by melee
-				lockoutTimer = acknowledgeCmd(displayButtons,selectButtons,100);
+				lockoutTimer = acknowledgeCmd(100,displayButtons,selectButtons);
 				lockout = true;
 			}
 			break;
+		}
 		case startMode: //controller sticks havn't been activated yet
+		{
 			if(cmdButtons.B){
 				controllerMode = safeMode;
-				lockoutTimer = acknowledgeCmd(displayButtons,selectButtons,500);
+				lockoutTimer = acknowledgeCmd(500,displayButtons,selectButtons);
 				lockout = true;
 			}
 			break;
+		}
 		case configMode: //in config mode need to check for all of our various command inputs
-			if(_currentCalStep == _notCalibrating) { //we are out of safe mode and not calibrating, so we check all the settings inputs 
-				if(cmdButtons.A && cmdButtons.X && cmdButtons.Y && cmdButtons.S) { //Safe Mode Toggle
+		{
+				//not calibrating, so we want to see the raw controller inputs
+				setButtons(selectButtons,false);
+				if(cmdButtons.A && cmdButtons.X && cmdButtons.Y && cmdButtons.S) { //return to safeMode
 					controllerMode = safeMode;
-					lockoutTimer = acknowledgeCmd(displayButtons,selectButtons,4000);
+					lockoutTimer = acknowledgeCmd(defaultLockTime*2,displayButtons,selectButtons);
 					lockout = true;
 				}
 				else if (cmdButtons.A && cmdButtons.B && cmdButtons.Z && cmdButtons.S) { //Hard Reset
 					resetDefaults();
-					lockoutTimer = acknowledgeCmd(displayButtons,selectButtons,4000);
+					lockoutTimer = acknowledgeCmd(defaultLockTime*2,displayButtons,selectButtons);
 					lockout = true;
 				}
 				else if (cmdButtons.X && cmdButtons.Y && cmdButtons.Du) { //Increase Rumble
 #ifdef RUMBLE
 					changeRumble(true);
-#else // RUMBLE
-			//nothing
-					lockoutTimer = acknowledgeCmd(displayButtons,selectButtons,2000);
-					lockout = true;
 #endif // RUMBLE
+					lockoutTimer = showOnCStick(defaultLockTime,0,_rumble,displayButtons,selectButtons);
+					lockout = true;
 				}
 				else if (cmdButtons.X && cmdButtons.Y && cmdButtons.Dd) { //Decrease Rumble
 #ifdef RUMBLE
 					changeRumble(false);
-#else // RUMBLE
-			//nothing
-					lockoutTimer = acknowledgeCmd(displayButtons,selectButtons,2000);
-					lockout = true;
 #endif // RUMBLE
+					lockoutTimer = showOnCStick(defaultLockTime,0,_rumble,displayButtons,selectButtons);
+					lockout = true;
 				}
 				else if (cmdButtons.X && cmdButtons.Y && cmdButtons.B && !cmdButtons.A) { //Show current rumble setting
-#ifdef RUMBLE
-					showRumble();
-					lockoutTimer = acknowledgeCmd(displayButtons,selectButtons,2000);
+					lockoutTimer = showOnCStick(defaultLockTime,0,_rumble,displayButtons,selectButtons);
 					lockout = true;
-#else // RUMBLE
-					lockoutTimer = acknowledgeCmd(displayButtons,selectButtons,defaultLockTime);
+				}
+				else if (cmdButtons.A && cmdButtons.X && cmdButtons.Y && cmdButtons.L) { //Analog Calibration
+					Serial.println("Calibrating the A stick");
+					controllerMode = calibrateMode;
+					stickToCalibrate = calibrateAStick;
+					currentCalStep = 0;
+					advanceCal = true;
+					lockoutTimer = acknowledgeCmd(defaultLockTime,displayButtons,selectButtons);
 					lockout = true;
-#endif // RUMBLE
-			}
-			else if (cmdButtons.A && cmdButtons.X && cmdButtons.Y && cmdButtons.L) { //Analog Calibration
-			Serial.println("Calibrating the A stick");
-			_calAStick = true;
-			_currentCalStep = 0;
-			_advanceCal = true;
-			freezeSticks(2000);
-			}
-			else if (cmdButtons.A && cmdButtons.X && cmdButtons.Y && cmdButtons.R) { //C-stick Calibration
-			Serial.println("Calibrating the C stick");
-			_calAStick = false;
-			_currentCalStep = 0;
-			_advanceCal = true;
-			freezeSticks(2000);
-			}
-			else if(cmdButtons.L && cmdButtons.X && cmdButtons.Du) { //Increase Analog X-Axis Snapback Filtering
-			adjustSnapback(true, true, true);
-			}
-			else if(cmdButtons.L && cmdButtons.X && cmdButtons.Dd) { //Decrease Analog X-Axis Snapback Filtering
-			adjustSnapback(true, true, false);
-			}
-			else if(cmdButtons.L && cmdButtons.Y && cmdButtons.Du) { //Increase Analog Y-Axis Snapback Filtering
-			adjustSnapback(true, false, true);
-			}
-			else if(cmdButtons.L && cmdButtons.Y && cmdButtons.Dd) { //Decrease Analog Y-Axis Snapback Filtering
-			adjustSnapback(true, false, false);
-			}
-			else if(cmdButtons.L && cmdButtons.A && cmdButtons.Du) { //Increase X-axis Delay
-			adjustSmoothing(true, true, true);
-			}
-			else if(cmdButtons.L && cmdButtons.A && cmdButtons.Dd) { //Decrease X-axis Delay
-			adjustSmoothing(true, true, false);
-			}
-			else if(cmdButtons.L && cmdButtons.B && cmdButtons.Du) { //Increase Y-axis Delay
-			adjustSmoothing(true, false, true);
-			}
-			else if(cmdButtons.L && cmdButtons.B && cmdButtons.Dd) { //Decrease Y-axis Delay
-			adjustSmoothing(true, false, false);
-			}
-			else if(cmdButtons.L && cmdButtons.S && cmdButtons.Dd) { //Show Current Analog Settings
-			showAstickSettings();
-			}
-			else if(cmdButtons.R && cmdButtons.X && cmdButtons.Du) { //Increase C-stick X-Axis Snapback Filtering
-			adjustCstickSmoothing(true, true, true);
-			}
-			else if(cmdButtons.R && cmdButtons.X && cmdButtons.Dd) { //Decrease C-stick X-Axis Snapback Filtering
-			adjustCstickSmoothing(true, true, false);
-			}
-			else if(cmdButtons.R && cmdButtons.Y && cmdButtons.Du) { //Increase C-stick Y-Axis Snapback Filtering
-			adjustCstickSmoothing(true, false, true);
-			}
-			else if(cmdButtons.R && cmdButtons.Y && cmdButtons.Dd) { //Decrease C-stick Y-Axis Snapback Filtering
-			adjustCstickSmoothing(true, false, false);
-			}
-			else if(cmdButtons.R && cmdButtons.A && cmdButtons.Du) { //Increase C-stick X Offset
-			adjustCstickOffset(true, true, true);
-			}
-			else if(cmdButtons.R && cmdButtons.A && cmdButtons.Dd) { //Decrease C-stick X Offset
-			adjustCstickOffset(true, true, false);
-			}
-			else if(cmdButtons.R && cmdButtons.B && cmdButtons.Du) { //Increase C-stick Y Offset
-			adjustCstickOffset(true, false, true);
-			}
-			else if(cmdButtons.R && cmdButtons.B && cmdButtons.Dd) { //Decrease C-stick Y Offset
-			adjustCstickOffset(true, false, false);
-			}
-			else if(cmdButtons.R && cmdButtons.S && cmdButtons.Dd) { //Show Current C-stick SEttings
-			showCstickSettings();
-			}
-			else if(cmdButtons.L && cmdButtons.Z && cmdButtons.S) { //Toggle Analog L
-			nextTriggerState(_lConfig, true);
-			freezeSticks(2000);
-			}
-			else if(cmdButtons.R && cmdButtons.Z && cmdButtons.S) { //Toggle Analog R
-			nextTriggerState(_rConfig, false);
-			freezeSticks(2000);
-			}
-			else if(cmdButtons.L && cmdButtons.Z && cmdButtons.Du) { //Increase L-Trigger Offset
-			adjustTriggerOffset(true, true, true);
-			}
-			else if(cmdButtons.L && cmdButtons.Z && cmdButtons.Dd) { //Decrease L-trigger Offset
-			adjustTriggerOffset(true, true, false);
-			}
-			else if(cmdButtons.R && cmdButtons.Z && cmdButtons.Du) { //Increase R-trigger Offset
-			adjustTriggerOffset(true, false, true);
-			}
-			else if(cmdButtons.R && cmdButtons.Z && cmdButtons.Dd) { //Decrease R-trigger Offset
-			adjustTriggerOffset(true, false, false);
-			}
-			else if(cmdButtons.X && cmdButtons.Z && cmdButtons.S) { //Swap X and Z
-			readJumpConfig(true, false);
-			freezeSticks(2000);
-			}
-			else if(cmdButtons.Y && cmdButtons.Z && cmdButtons.S) { //Swap Y and Z
-			readJumpConfig(false, true);
-			freezeSticks(2000);
-			}
-			else if(cmdButtons.A && cmdButtons.X && cmdButtons.Y && cmdButtons.Z) { // Reset X/Y/Z Config
-			readJumpConfig(false, false);
-			freezeSticks(2000);
-			}
+				}
+				else if (cmdButtons.A && cmdButtons.X && cmdButtons.Y && cmdButtons.R) { //C-stick Calibration
+					Serial.println("Calibrating the C stick");
+					controllerMode = calibrateMode;
+					stickToCalibrate = calibrateCStick;
+					currentCalStep = 0;
+					advanceCal = true;
+					lockoutTimer = acknowledgeCmd(defaultLockTime,displayButtons,selectButtons);
+					lockout = true;
+				}
+				else if(cmdButtons.L && cmdButtons.X && cmdButtons.Du) { //Increase Analog X-Axis Snapback Filtering
+					adjustSnapback(true, true, true);
+					lockoutTimer = showOnCStick(defaultLockTime,_xSnapback,_ySnapback,displayButtons,selectButtons);
+					lockout = true;
+				}
+				else if(cmdButtons.L && cmdButtons.X && cmdButtons.Dd) { //Decrease Analog X-Axis Snapback Filtering
+					adjustSnapback(true, true, false);
+					lockoutTimer = showOnCStick(defaultLockTime,_xSnapback,_ySnapback,displayButtons,selectButtons);
+					lockout = true;
+				}
+				else if(cmdButtons.L && cmdButtons.Y && cmdButtons.Du) { //Increase Analog Y-Axis Snapback Filtering
+					adjustSnapback(true, false, true);
+					lockoutTimer = showOnCStick(defaultLockTime,_xSnapback,_ySnapback,displayButtons,selectButtons);
+					lockout = true;
+				}
+				else if(cmdButtons.L && cmdButtons.Y && cmdButtons.Dd) { //Decrease Analog Y-Axis Snapback Filtering
+					adjustSnapback(true, false, false);
+					lockoutTimer = showOnCStick(defaultLockTime,_xSnapback,_ySnapback,displayButtons,selectButtons);
+					lockout = true;
+				}
+				else if(cmdButtons.L && cmdButtons.A && cmdButtons.Du) { //Increase X-axis Delay
+					adjustSmoothingA(true, true, true);
+					lockoutTimer = showOnCStick(defaultLockTime,_gains.xSmoothing*10,_gains.ySmoothing*10,displayButtons,selectButtons);
+					lockout = true;
+				}
+				else if(cmdButtons.L && cmdButtons.A && cmdButtons.Dd) { //Decrease X-axis Delay
+					adjustSmoothingA(true, true, false);
+					lockoutTimer = showOnCStick(defaultLockTime,_gains.xSmoothing*10,_gains.ySmoothing*10,displayButtons,selectButtons);
+					lockout = true;
+				}
+				else if(cmdButtons.L && cmdButtons.B && cmdButtons.Du) { //Increase Y-axis Delay
+					adjustSmoothingA(true, false, true);
+					lockoutTimer = showOnCStick(defaultLockTime,_gains.xSmoothing*10,_gains.ySmoothing*10,displayButtons,selectButtons);
+					lockout = true;
+				}
+				else if(cmdButtons.L && cmdButtons.B && cmdButtons.Dd) { //Decrease Y-axis Delay
+					adjustSmoothingA(true, false, false);
+					lockoutTimer = showOnCStick(defaultLockTime,_gains.xSmoothing*10,_gains.ySmoothing*10,displayButtons,selectButtons);
+					lockout = true;
+				}
+				else if(cmdButtons.L && cmdButtons.S && cmdButtons.Dd) { //Show Current Analog Settings
+					lockoutTimer = showOnBothSticks(defaultLockTime,_xSnapback,_ySnapback,_gains.xSmoothing*10,_gains.ySmoothing*10,displayButtons,selectButtons);
+					lockout = true;
+				}
+				else if(cmdButtons.R && cmdButtons.X && cmdButtons.Du) { //Increase C-stick X-Axis Snapback Filtering
+					adjustSmoothingC(true, true, true);
+					lockoutTimer = showOnCStick(defaultLockTime,_gains.cXSmoothing*10,_gains.cYSmoothing*10,displayButtons,selectButtons);
+					lockout = true;
+				}
+				else if(cmdButtons.R && cmdButtons.X && cmdButtons.Dd) { //Decrease C-stick X-Axis Snapback Filtering
+					adjustSmoothingC(true, true, false);
+					lockoutTimer = showOnCStick(defaultLockTime,_gains.cXSmoothing*10,_gains.cYSmoothing*10,displayButtons,selectButtons);
+					lockout = true;
+					
+				}
+				else if(cmdButtons.R && cmdButtons.Y && cmdButtons.Du) { //Increase C-stick Y-Axis Snapback Filtering
+					adjustSmoothingC(true, false, true);
+					lockoutTimer = showOnCStick(defaultLockTime,_gains.cXSmoothing*10,_gains.cYSmoothing*10,displayButtons,selectButtons);
+					lockout = true;
+				}
+				else if(cmdButtons.R && cmdButtons.Y && cmdButtons.Dd) { //Decrease C-stick Y-Axis Snapback Filtering
+					adjustSmoothingC(true, false, false);
+					lockoutTimer = showOnCStick(defaultLockTime,_gains.cXSmoothing*10,_gains.cYSmoothing*10,displayButtons,selectButtons);
+					lockout = true;
+				}
+				else if(cmdButtons.R && cmdButtons.A && cmdButtons.Du) { //Increase C-stick X Offset
+					adjustCstickOffset(true, true, true);
+					lockoutTimer = showOnCStick(defaultLockTime,_cXOffset,_cYOffset,displayButtons,selectButtons);
+					lockout = true;
+				}
+				else if(cmdButtons.R && cmdButtons.A && cmdButtons.Dd) { //Decrease C-stick X Offset
+					adjustCstickOffset(true, true, false);
+					lockoutTimer = showOnCStick(defaultLockTime,_cXOffset,_cYOffset,displayButtons,selectButtons);
+					lockout = true;
+				}
+				else if(cmdButtons.R && cmdButtons.B && cmdButtons.Du) { //Increase C-stick Y Offset
+					adjustCstickOffset(true, false, true);
+					lockoutTimer = showOnCStick(defaultLockTime,_cXOffset,_cYOffset,displayButtons,selectButtons);
+					lockout = true;
+				}
+				else if(cmdButtons.R && cmdButtons.B && cmdButtons.Dd) { //Decrease C-stick Y Offset
+					adjustCstickOffset(true, false, false);
+					lockoutTimer = showOnCStick(defaultLockTime,_cXOffset,_cYOffset,displayButtons,selectButtons);
+					lockout = true;
+				}
+				else if(cmdButtons.R && cmdButtons.S && cmdButtons.Dd) { //Show Current C-stick Settings
+					lockoutTimer = showOnBothSticks(defaultLockTime,_gains.cXSmoothing * 10,_gains.cYSmoothing * 10,_cXOffset,_cYOffset,displayButtons,selectButtons);
+					lockout = true;
+				}
+				else if(cmdButtons.L && cmdButtons.Z && cmdButtons.S) { //Toggle Analog L
+					nextTriggerState(_lConfig, true);
+					lockoutTimer = acknowledgeCmd(defaultLockTime,displayButtons,selectButtons);
+					lockout = true;
+				}
+				else if(cmdButtons.R && cmdButtons.Z && cmdButtons.S) { //Toggle Analog R
+					nextTriggerState(_rConfig, false);
+					lockoutTimer = acknowledgeCmd(defaultLockTime,displayButtons,selectButtons);
+					lockout = true;
+				}
+				else if(cmdButtons.L && cmdButtons.Z && cmdButtons.Du) { //Increase L-Trigger Offset
+					adjustTriggerOffset(true, true, true);
+					lockoutTimer = showTriggerOffset(defaultLockTime,_LTriggerOffset,_RTriggerOffset,displayButtons,selectButtons);
+					lockout = true;
+				}
+				else if(cmdButtons.L && cmdButtons.Z && cmdButtons.Dd) { //Decrease L-trigger Offset
+					adjustTriggerOffset(true, true, false);
+					lockoutTimer = showTriggerOffset(defaultLockTime,_LTriggerOffset,_RTriggerOffset,displayButtons,selectButtons);
+					lockout = true;
+				}
+				else if(cmdButtons.R && cmdButtons.Z && cmdButtons.Du) { //Increase R-trigger Offset
+					adjustTriggerOffset(true, false, true);
+					lockoutTimer = showTriggerOffset(defaultLockTime,_LTriggerOffset,_RTriggerOffset,displayButtons,selectButtons);
+					lockout = true;
+				}
+				else if(cmdButtons.R && cmdButtons.Z && cmdButtons.Dd) { //Decrease R-trigger Offset
+					adjustTriggerOffset(true, false, false);
+					lockoutTimer = showTriggerOffset(defaultLockTime,_LTriggerOffset,_RTriggerOffset,displayButtons,selectButtons);
+					lockout = true;
+				}
+				else if(cmdButtons.X && cmdButtons.Z && cmdButtons.S) { //Swap X and Z
+					readJumpConfig(true, false);
+					lockoutTimer = acknowledgeCmd(defaultLockTime,displayButtons,selectButtons);
+					lockout = true;
+				}
+				else if(cmdButtons.Y && cmdButtons.Z && cmdButtons.S) { //Swap Y and Z
+					readJumpConfig(false, true);
+					lockoutTimer = acknowledgeCmd(defaultLockTime,displayButtons,selectButtons);
+					lockout = true;
+				}
+				else if(cmdButtons.A && cmdButtons.X && cmdButtons.Y && cmdButtons.Z) { // Reset X/Y/Z Config
+					readJumpConfig(false, false);
+					lockoutTimer = acknowledgeCmd(defaultLockTime,displayButtons,selectButtons);
+					lockout = true;
+				}
+				break;
 		}
-		//Skip stick measurement and go to notch adjust using the start button while calibrating
-		else if(_runButtons.S && (_currentCalStep >= 0 && _currentCalStep < 32)){ 
-			_currentCalStep = _noOfCalibrationPoints;
-			//Do the same thing we would have done at step 32 had we actually collected the points, but with stored tempCalPoints
-			if(!_calAStick){
-				//get the calibration points collected during the last A stick calibration
-				EEPROM.get(_eepromCPointsX, _tempCalPointsX);
-				EEPROM.get(_eepromCPointsY, _tempCalPointsY);
-				EEPROM.get(_eepromCNotchAngles, _cNotchAngles);
-				//make temp temp cal points that are missing all tertiary notches so that we get a neutral grid
-				float tempCalPointsX[_noOfCalibrationPoints];
-				float tempCalPointsY[_noOfCalibrationPoints];
-				stripCalPoints(_tempCalPointsX, _tempCalPointsY, tempCalPointsX, tempCalPointsY);
-				//clean the stripped calibration points, use default angles
-				cleanCalPoints(tempCalPointsX, tempCalPointsY, _notchAngleDefaults, _cleanedPointsX, _cleanedPointsY, _notchPointsX, _notchPointsY, _cNotchStatus);
-				linearizeCal(_cleanedPointsX, _cleanedPointsY, _cleanedPointsX, _cleanedPointsY, _cFitCoeffsX, _cFitCoeffsY);
-				notchCalibrate(_cleanedPointsX, _cleanedPointsY, _notchPointsX, _notchPointsY, _noOfNotches, _cAffineCoeffs, _cBoundaryAngles);
-				//apply the calibration to the original measured values including any tertiaries; we don't care about the angles
-				cleanCalPoints(_tempCalPointsX, _tempCalPointsY, _notchAngleDefaults, _cleanedPointsX, _cleanedPointsY, _notchPointsX, _notchPointsY, _cNotchStatus);
-				float transformedX[_noOfNotches+1];
-				float transformedY[_noOfNotches+1];
-				transformCalPoints(_cleanedPointsX, _cleanedPointsY, transformedX, transformedY, _cFitCoeffsX, _cFitCoeffsY, _cAffineCoeffs, _cBoundaryAngles);
-				//compute the angles for those notches into _measuredNotchAngles, using the default angles for the diagonals
-				computeStickAngles(transformedX, transformedY, _measuredNotchAngles);
-				//clean full cal points again, feeding those angles in
-				cleanCalPoints(_tempCalPointsX, _tempCalPointsY, _measuredNotchAngles, _cleanedPointsX, _cleanedPointsY, _notchPointsX, _notchPointsY, _cNotchStatus);
-				//clear unused notch angles
-				cleanNotches(_cNotchAngles, _measuredNotchAngles, _cNotchStatus);
-				//clean full cal points again again, feeding those measured angles in for missing tertiary notches
-				cleanCalPoints(_tempCalPointsX, _tempCalPointsY, _cNotchAngles, _cleanedPointsX, _cleanedPointsY, _notchPointsX, _notchPointsY, _cNotchStatus);
-				//linearize again
-				linearizeCal(_cleanedPointsX, _cleanedPointsY, _cleanedPointsX, _cleanedPointsY, _cFitCoeffsX, _cFitCoeffsY);
-				//notchCalibrate again
-				notchCalibrate(_cleanedPointsX, _cleanedPointsY, _notchPointsX, _notchPointsY, _noOfNotches, _cAffineCoeffs, _cBoundaryAngles);
-			} else if(_calAStick){
-				//get the calibration points collected during the last A stick calibration
-				EEPROM.get(_eepromAPointsX, _tempCalPointsX);
-				EEPROM.get(_eepromAPointsY, _tempCalPointsY);
-				EEPROM.get(_eepromANotchAngles, _aNotchAngles);
-				//make temp temp cal points that are missing all tertiary notches so that we get a neutral grid
-				float tempCalPointsX[_noOfCalibrationPoints];
-				float tempCalPointsY[_noOfCalibrationPoints];
-				stripCalPoints(_tempCalPointsX, _tempCalPointsY, tempCalPointsX, tempCalPointsY);
-				//clean the stripped calibration points, use default angles
-				cleanCalPoints(tempCalPointsX, tempCalPointsY, _notchAngleDefaults, _cleanedPointsX, _cleanedPointsY, _notchPointsX, _notchPointsY, _aNotchStatus);
-				linearizeCal(_cleanedPointsX, _cleanedPointsY, _cleanedPointsX, _cleanedPointsY, _aFitCoeffsX, _aFitCoeffsY);
-				notchCalibrate(_cleanedPointsX, _cleanedPointsY, _notchPointsX, _notchPointsY, _noOfNotches, _aAffineCoeffs, _aBoundaryAngles);
-				//apply the calibration to the original measured values including any tertiaries; we don't care about the angles
-				cleanCalPoints(_tempCalPointsX, _tempCalPointsY, _notchAngleDefaults, _cleanedPointsX, _cleanedPointsY, _notchPointsX, _notchPointsY, _aNotchStatus);
-				float transformedX[_noOfNotches+1];
-				float transformedY[_noOfNotches+1];
-				transformCalPoints(_cleanedPointsX, _cleanedPointsY, transformedX, transformedY, _aFitCoeffsX, _aFitCoeffsY, _aAffineCoeffs, _aBoundaryAngles);
-				//compute the angles for those notches into _measuredNotchAngles, using the default angles for the diagonals
-				computeStickAngles(transformedX, transformedY, _measuredNotchAngles);
-				//clean full cal points again, feeding those angles in
-				cleanCalPoints(_tempCalPointsX, _tempCalPointsY, _measuredNotchAngles, _cleanedPointsX, _cleanedPointsY, _notchPointsX, _notchPointsY, _aNotchStatus);
-				//clear unused notch angles
-				cleanNotches(_aNotchAngles, _measuredNotchAngles, _aNotchStatus);
-				//clean full cal points again again, feeding those measured angles in for missing tertiary notches
-				cleanCalPoints(_tempCalPointsX, _tempCalPointsY, _aNotchAngles, _cleanedPointsX, _cleanedPointsY, _notchPointsX, _notchPointsY, _aNotchStatus);
-				//linearize again
-				linearizeCal(_cleanedPointsX, _cleanedPointsY, _cleanedPointsX, _cleanedPointsY, _aFitCoeffsX, _aFitCoeffsY);
-				//notchCalibrate again
-				notchCalibrate(_cleanedPointsX, _cleanedPointsY, _notchPointsX, _notchPointsY, _noOfNotches, _aAffineCoeffs, _aBoundaryAngles);
-			}
-		}
-		//Undo Calibration using Z-button
-		else if(hardwareZ && _undoCal && !_undoCalPressed) {
-			_undoCalPressed = true;
-			if(_currentCalStep % 2 == 0 && _currentCalStep < 32 && _currentCalStep != 0 ) {
-				//If it's measuring zero, go back to the previous zero
-				_currentCalStep --;
-				_currentCalStep --;
-			} else if(_currentCalStep % 2 == 1 && _currentCalStep < 32 && _currentCalStep != 0 ) {
-				//If it's measuring a notch, go back to the zero before the previous notch
-				_currentCalStep -= 3;
-				_currentCalStep = max(_currentCalStep, 0);
-			} else if(_currentCalStep > 32) {
-				//We can go directly between notches when adjusting notches
-				_currentCalStep --;
-			}
-			if(!_calAStick){
-				int notchIndex = _notchAdjOrder[min(_currentCalStep-_noOfCalibrationPoints, _noOfAdjNotches-1)];//limit this so it doesn't access outside the array bounds
-				while((_currentCalStep >= _noOfCalibrationPoints) && (_cNotchStatus[notchIndex] == _tertiaryNotchInactive) && (_currentCalStep < _noOfCalibrationPoints + _noOfAdjNotches)){//this non-diagonal notch was not calibrated
-					//skip to the next valid notch
-					_currentCalStep--;
-					notchIndex = _notchAdjOrder[min(_currentCalStep-_noOfCalibrationPoints, _noOfAdjNotches-1)];//limit this so it doesn't access outside the array bounds
-				}
-			} else if(_calAStick){
-				int notchIndex = _notchAdjOrder[min(_currentCalStep-_noOfCalibrationPoints, _noOfAdjNotches-1)];//limit this so it doesn't access outside the array bounds
-				while((_currentCalStep >= _noOfCalibrationPoints) && (_aNotchStatus[notchIndex] == _tertiaryNotchInactive) && (_currentCalStep < _noOfCalibrationPoints + _noOfAdjNotches)){//this non-diagonal notch was not calibrated
-					//skip to the next valid notch
-					_currentCalStep--;
-					notchIndex = _notchAdjOrder[min(_currentCalStep-_noOfCalibrationPoints, _noOfAdjNotches-1)];//limit this so it doesn't access outside the array bounds
-				}
-			}
-		} else if(!hardwareZ) {
-			_undoCalPressed = false;
-		}
-		//Advance Calibration Using L or R triggers
-		else if((hardwareL || hardwareR) && _advanceCal && !_advanceCalPressed){
-			_advanceCalPressed = true;
-			if (!_calAStick){
-				if(_currentCalStep < _noOfCalibrationPoints){//still collecting points
-					collectCalPoints(_calAStick, _currentCalStep,_tempCalPointsX,_tempCalPointsY);
-				}
-				_currentCalStep ++;
-				if(_currentCalStep >= 2 && _currentCalStep != _noOfNotches*2) {//don't undo at the beginning of collection or notch adjust
-					_undoCal = true;
-				} else {
-					_undoCal = false;
-				}
-				if(_currentCalStep == _noOfCalibrationPoints){//done collecting points
-					Serial.println("finished collecting the calibration points for the C stick");
+		case calibrateMode:
+		{
+			//Skip stick measurement and go to notch adjust using the start button while calibrating
+			if(cmdButtons.S  && currentCalStep < (_noOfNotches*2)){ 
+				currentCalStep = _noOfCalibrationPoints;
+				//Do the same thing we would have done at step 32 had we actually collected the points, but with stored tempCalPoints
+				if(stickToCalibrate == calibrateCStick){
+					//get the calibration points collected during the last A stick calibration
+					EEPROM.get(_eepromCPointsX, _tempCalPointsX);
+					EEPROM.get(_eepromCPointsY, _tempCalPointsY);
+					EEPROM.get(_eepromCNotchAngles, _cNotchAngles);
 					//make temp temp cal points that are missing all tertiary notches so that we get a neutral grid
 					float tempCalPointsX[_noOfCalibrationPoints];
 					float tempCalPointsY[_noOfCalibrationPoints];
@@ -886,41 +808,11 @@ void handleCommands(Buttons &displayButtons,Buttons &selectButtons){
 					linearizeCal(_cleanedPointsX, _cleanedPointsY, _cleanedPointsX, _cleanedPointsY, _cFitCoeffsX, _cFitCoeffsY);
 					//notchCalibrate again
 					notchCalibrate(_cleanedPointsX, _cleanedPointsY, _notchPointsX, _notchPointsY, _noOfNotches, _cAffineCoeffs, _cBoundaryAngles);
-				}
-				int notchIndex = _notchAdjOrder[min(_currentCalStep-_noOfCalibrationPoints, _noOfAdjNotches-1)];//limit this so it doesn't access outside the array bounds
-				while((_currentCalStep >= _noOfCalibrationPoints) && (_cNotchStatus[notchIndex] == _tertiaryNotchInactive) && (_currentCalStep < _noOfCalibrationPoints + _noOfAdjNotches)){//this non-diagonal notch was not calibrated
-					//skip to the next valid notch
-					_currentCalStep++;
-					notchIndex = _notchAdjOrder[min(_currentCalStep-_noOfCalibrationPoints, _noOfAdjNotches-1)];//limit this so it doesn't access outside the array bounds
-				}
-				if(_currentCalStep >= _noOfCalibrationPoints + _noOfAdjNotches){//done adjusting notches
-					Serial.println("finished adjusting notches for the C stick");
-					EEPROM.put(_eepromCPointsX,_tempCalPointsX);
-					EEPROM.put(_eepromCPointsY,_tempCalPointsY);
-					EEPROM.put(_eepromCNotchAngles,_cNotchAngles);
-					Serial.println("calibration points stored in EEPROM");
-					cleanCalPoints(_tempCalPointsX, _tempCalPointsY, _cNotchAngles, _cleanedPointsX, _cleanedPointsY, _notchPointsX, _notchPointsY, _cNotchStatus);
-					Serial.println("calibration points cleaned");
-					linearizeCal(_cleanedPointsX, _cleanedPointsY, _cleanedPointsX, _cleanedPointsY, _cFitCoeffsX, _cFitCoeffsY);
-					Serial.println("C stick linearized");
-					notchCalibrate(_cleanedPointsX, _cleanedPointsY, _notchPointsX, _notchPointsY, _noOfNotches, _cAffineCoeffs, _cBoundaryAngles);
-					_currentCalStep = _notCalibrating;
-					_advanceCal = false;
-				}
-			}
-			else if (_calAStick){
-				Serial.println("Current step:");
-				Serial.println(_currentCalStep);
-				if(_currentCalStep < _noOfCalibrationPoints){//still collecting points
-					collectCalPoints(_calAStick, _currentCalStep,_tempCalPointsX,_tempCalPointsY);
-				}
-				_currentCalStep ++;
-				if(_currentCalStep >= 2 && _currentCalStep != _noOfCalibrationPoints) {//don't undo at the beginning of collection or notch adjust
-					_undoCal = true;
-				} else {
-					_undoCal = false;
-				}
-				if(_currentCalStep == _noOfCalibrationPoints){//done collecting points
+				} else if(stickToCalibrate == calibrateAStick){
+					//get the calibration points collected during the last A stick calibration
+					EEPROM.get(_eepromAPointsX, _tempCalPointsX);
+					EEPROM.get(_eepromAPointsY, _tempCalPointsY);
+					EEPROM.get(_eepromANotchAngles, _aNotchAngles);
 					//make temp temp cal points that are missing all tertiary notches so that we get a neutral grid
 					float tempCalPointsX[_noOfCalibrationPoints];
 					float tempCalPointsY[_noOfCalibrationPoints];
@@ -947,38 +839,202 @@ void handleCommands(Buttons &displayButtons,Buttons &selectButtons){
 					//notchCalibrate again
 					notchCalibrate(_cleanedPointsX, _cleanedPointsY, _notchPointsX, _notchPointsY, _noOfNotches, _aAffineCoeffs, _aBoundaryAngles);
 				}
-				int notchIndex = _notchAdjOrder[min(_currentCalStep-_noOfCalibrationPoints, _noOfAdjNotches-1)];//limit this so it doesn't access outside the array bounds
-				while((_currentCalStep >= _noOfCalibrationPoints) && (_aNotchStatus[notchIndex] == _tertiaryNotchInactive) && (_currentCalStep < _noOfCalibrationPoints + _noOfAdjNotches)){//this non-diagonal notch was not calibrated
-					//skip to the next valid notch
-					_currentCalStep++;
-					notchIndex = _notchAdjOrder[min(_currentCalStep-_noOfCalibrationPoints, _noOfAdjNotches-1)];//limit this so it doesn't access outside the array bounds
+			}
+			//Undo Calibration using Z-button
+			else if(cmdButtons.Z && undoCal && !undoCalPressed) {
+				undoCalPressed = true;
+				if(currentCalStep % 2 == 0 && currentCalStep < 32 && currentCalStep != 0 ) {
+					//If it's measuring zero, go back to the previous zero
+					currentCalStep --;
+					currentCalStep --;
+				} else if(currentCalStep % 2 == 1 && currentCalStep < 32 && currentCalStep != 0 ) {
+					//If it's measuring a notch, go back to the zero before the previous notch
+					currentCalStep -= 3;
+					currentCalStep = max(currentCalStep, 0);
+				} else if(currentCalStep > 32) {
+					//We can go directly between notches when adjusting notches
+					currentCalStep --;
 				}
-				if(_currentCalStep >= _noOfCalibrationPoints + _noOfAdjNotches){//done adjusting notches
-					Serial.println("finished adjusting notches for the A stick");
-					EEPROM.put(_eepromAPointsX,_tempCalPointsX);
-					EEPROM.put(_eepromAPointsY,_tempCalPointsY);
-					EEPROM.put(_eepromANotchAngles,_aNotchAngles);
-					Serial.println("calibration points stored in EEPROM");
-					cleanCalPoints(_tempCalPointsX, _tempCalPointsY, _aNotchAngles, _cleanedPointsX, _cleanedPointsY, _notchPointsX, _notchPointsY, _aNotchStatus);
-					Serial.println("calibration points cleaned");
-					linearizeCal(_cleanedPointsX, _cleanedPointsY, _cleanedPointsX, _cleanedPointsY, _aFitCoeffsX, _aFitCoeffsY);
-					Serial.println("A stick linearized");
-					notchCalibrate(_cleanedPointsX, _cleanedPointsY, _notchPointsX, _notchPointsY, _noOfNotches, _aAffineCoeffs, _aBoundaryAngles);
-					_currentCalStep = _notCalibrating;
-					_advanceCal = false;
+				if(stickToCalibrate == calibrateCStick){
+					int notchIndex = _notchAdjOrder[min(currentCalStep-_noOfCalibrationPoints, _noOfAdjNotches-1)];//limit this so it doesn't access outside the array bounds
+					while((currentCalStep >= _noOfCalibrationPoints) && (_cNotchStatus[notchIndex] == _tertiaryNotchInactive) && (currentCalStep < _noOfCalibrationPoints + _noOfAdjNotches)){//this non-diagonal notch was not calibrated
+						//skip to the next valid notch
+						currentCalStep--;
+						notchIndex = _notchAdjOrder[min(currentCalStep-_noOfCalibrationPoints, _noOfAdjNotches-1)];//limit this so it doesn't access outside the array bounds
+					}
+				} else if(stickToCalibrate == calibrateAStick){
+					int notchIndex = _notchAdjOrder[min(currentCalStep-_noOfCalibrationPoints, _noOfAdjNotches-1)];//limit this so it doesn't access outside the array bounds
+					while((currentCalStep >= _noOfCalibrationPoints) && (_aNotchStatus[notchIndex] == _tertiaryNotchInactive) && (currentCalStep < _noOfCalibrationPoints + _noOfAdjNotches)){//this non-diagonal notch was not calibrated
+						//skip to the next valid notch
+						currentCalStep--;
+						notchIndex = _notchAdjOrder[min(currentCalStep-_noOfCalibrationPoints, _noOfAdjNotches-1)];//limit this so it doesn't access outside the array bounds
+					}
+				}
+			} else if(!hardwareZ) {
+				undoCalPressed = false;
+			}
+			//Advance Calibration Using L or R triggers
+			else if((cmdButtons.L || cmdButtons.R) && advanceCal && !advanceCalPressed){
+				advanceCalPressed = true;
+				if (stickToCalibrate == calibrateCStick){
+					if(currentCalStep < _noOfCalibrationPoints){//still collecting points
+						collectCalPoints(stickToCalibrate, currentCalStep,_tempCalPointsX,_tempCalPointsY);
+					}
+					currentCalStep ++;
+					if(currentCalStep >= 2 && currentCalStep != _noOfNotches*2) {//don't undo at the beginning of collection or notch adjust
+						undoCal = true;
+					} else {
+						undoCal = false;
+					}
+					if(currentCalStep == _noOfCalibrationPoints){//done collecting points
+						Serial.println("finished collecting the calibration points for the C stick");
+						//make temp temp cal points that are missing all tertiary notches so that we get a neutral grid
+						float tempCalPointsX[_noOfCalibrationPoints];
+						float tempCalPointsY[_noOfCalibrationPoints];
+						stripCalPoints(_tempCalPointsX, _tempCalPointsY, tempCalPointsX, tempCalPointsY);
+						//clean the stripped calibration points, use default angles
+						cleanCalPoints(tempCalPointsX, tempCalPointsY, _notchAngleDefaults, _cleanedPointsX, _cleanedPointsY, _notchPointsX, _notchPointsY, _cNotchStatus);
+						linearizeCal(_cleanedPointsX, _cleanedPointsY, _cleanedPointsX, _cleanedPointsY, _cFitCoeffsX, _cFitCoeffsY);
+						notchCalibrate(_cleanedPointsX, _cleanedPointsY, _notchPointsX, _notchPointsY, _noOfNotches, _cAffineCoeffs, _cBoundaryAngles);
+						//apply the calibration to the original measured values including any tertiaries; we don't care about the angles
+						cleanCalPoints(_tempCalPointsX, _tempCalPointsY, _notchAngleDefaults, _cleanedPointsX, _cleanedPointsY, _notchPointsX, _notchPointsY, _cNotchStatus);
+						float transformedX[_noOfNotches+1];
+						float transformedY[_noOfNotches+1];
+						transformCalPoints(_cleanedPointsX, _cleanedPointsY, transformedX, transformedY, _cFitCoeffsX, _cFitCoeffsY, _cAffineCoeffs, _cBoundaryAngles);
+						//compute the angles for those notches into _measuredNotchAngles, using the default angles for the diagonals
+						computeStickAngles(transformedX, transformedY, _measuredNotchAngles);
+						//clean full cal points again, feeding those angles in
+						cleanCalPoints(_tempCalPointsX, _tempCalPointsY, _measuredNotchAngles, _cleanedPointsX, _cleanedPointsY, _notchPointsX, _notchPointsY, _cNotchStatus);
+						//clear unused notch angles
+						cleanNotches(_cNotchAngles, _measuredNotchAngles, _cNotchStatus);
+						//clean full cal points again again, feeding those measured angles in for missing tertiary notches
+						cleanCalPoints(_tempCalPointsX, _tempCalPointsY, _cNotchAngles, _cleanedPointsX, _cleanedPointsY, _notchPointsX, _notchPointsY, _cNotchStatus);
+						//linearize again
+						linearizeCal(_cleanedPointsX, _cleanedPointsY, _cleanedPointsX, _cleanedPointsY, _cFitCoeffsX, _cFitCoeffsY);
+						//notchCalibrate again
+						notchCalibrate(_cleanedPointsX, _cleanedPointsY, _notchPointsX, _notchPointsY, _noOfNotches, _cAffineCoeffs, _cBoundaryAngles);
+					}
+					int notchIndex = _notchAdjOrder[min(currentCalStep-_noOfCalibrationPoints, _noOfAdjNotches-1)];//limit this so it doesn't access outside the array bounds
+					while((currentCalStep >= _noOfCalibrationPoints) && (_cNotchStatus[notchIndex] == _tertiaryNotchInactive) && (currentCalStep < _noOfCalibrationPoints + _noOfAdjNotches)){//this non-diagonal notch was not calibrated
+						//skip to the next valid notch
+						currentCalStep++;
+						notchIndex = _notchAdjOrder[min(currentCalStep-_noOfCalibrationPoints, _noOfAdjNotches-1)];//limit this so it doesn't access outside the array bounds
+					}
+					if(currentCalStep >= _noOfCalibrationPoints + _noOfAdjNotches){//done adjusting notches
+						Serial.println("finished adjusting notches for the C stick");
+						EEPROM.put(_eepromCPointsX,_tempCalPointsX);
+						EEPROM.put(_eepromCPointsY,_tempCalPointsY);
+						EEPROM.put(_eepromCNotchAngles,_cNotchAngles);
+						Serial.println("calibration points stored in EEPROM");
+						cleanCalPoints(_tempCalPointsX, _tempCalPointsY, _cNotchAngles, _cleanedPointsX, _cleanedPointsY, _notchPointsX, _notchPointsY, _cNotchStatus);
+						Serial.println("calibration points cleaned");
+						linearizeCal(_cleanedPointsX, _cleanedPointsY, _cleanedPointsX, _cleanedPointsY, _cFitCoeffsX, _cFitCoeffsY);
+						Serial.println("C stick linearized");
+						notchCalibrate(_cleanedPointsX, _cleanedPointsY, _notchPointsX, _notchPointsY, _noOfNotches, _cAffineCoeffs, _cBoundaryAngles);
+						currentCalStep = 0;
+						advanceCal = false;
+					}
+				}
+				else if (stickToCalibrate == calibrateAStick){
+					Serial.println("Current step:");
+					Serial.println(currentCalStep);
+					if(currentCalStep < _noOfCalibrationPoints){//still collecting points
+						collectCalPoints(stickToCalibrate, currentCalStep,_tempCalPointsX,_tempCalPointsY);
+					}
+					currentCalStep ++;
+					if(currentCalStep >= 2 && currentCalStep != _noOfCalibrationPoints) {//don't undo at the beginning of collection or notch adjust
+						undoCal = true;
+					} else {
+						undoCal = false;
+					}
+					if(currentCalStep == _noOfCalibrationPoints){//done collecting points
+						//make temp temp cal points that are missing all tertiary notches so that we get a neutral grid
+						float tempCalPointsX[_noOfCalibrationPoints];
+						float tempCalPointsY[_noOfCalibrationPoints];
+						stripCalPoints(_tempCalPointsX, _tempCalPointsY, tempCalPointsX, tempCalPointsY);
+						//clean the stripped calibration points, use default angles
+						cleanCalPoints(tempCalPointsX, tempCalPointsY, _notchAngleDefaults, _cleanedPointsX, _cleanedPointsY, _notchPointsX, _notchPointsY, _aNotchStatus);
+						linearizeCal(_cleanedPointsX, _cleanedPointsY, _cleanedPointsX, _cleanedPointsY, _aFitCoeffsX, _aFitCoeffsY);
+						notchCalibrate(_cleanedPointsX, _cleanedPointsY, _notchPointsX, _notchPointsY, _noOfNotches, _aAffineCoeffs, _aBoundaryAngles);
+						//apply the calibration to the original measured values including any tertiaries; we don't care about the angles
+						cleanCalPoints(_tempCalPointsX, _tempCalPointsY, _notchAngleDefaults, _cleanedPointsX, _cleanedPointsY, _notchPointsX, _notchPointsY, _aNotchStatus);
+						float transformedX[_noOfNotches+1];
+						float transformedY[_noOfNotches+1];
+						transformCalPoints(_cleanedPointsX, _cleanedPointsY, transformedX, transformedY, _aFitCoeffsX, _aFitCoeffsY, _aAffineCoeffs, _aBoundaryAngles);
+						//compute the angles for those notches into _measuredNotchAngles, using the default angles for the diagonals
+						computeStickAngles(transformedX, transformedY, _measuredNotchAngles);
+						//clean full cal points again, feeding those angles in
+						cleanCalPoints(_tempCalPointsX, _tempCalPointsY, _measuredNotchAngles, _cleanedPointsX, _cleanedPointsY, _notchPointsX, _notchPointsY, _aNotchStatus);
+						//clear unused notch angles
+						cleanNotches(_aNotchAngles, _measuredNotchAngles, _aNotchStatus);
+						//clean full cal points again again, feeding those measured angles in for missing tertiary notches
+						cleanCalPoints(_tempCalPointsX, _tempCalPointsY, _aNotchAngles, _cleanedPointsX, _cleanedPointsY, _notchPointsX, _notchPointsY, _aNotchStatus);
+						//linearize again
+						linearizeCal(_cleanedPointsX, _cleanedPointsY, _cleanedPointsX, _cleanedPointsY, _aFitCoeffsX, _aFitCoeffsY);
+						//notchCalibrate again
+						notchCalibrate(_cleanedPointsX, _cleanedPointsY, _notchPointsX, _notchPointsY, _noOfNotches, _aAffineCoeffs, _aBoundaryAngles);
+					}
+					int notchIndex = _notchAdjOrder[min(currentCalStep-_noOfCalibrationPoints, _noOfAdjNotches-1)];//limit this so it doesn't access outside the array bounds
+					while((currentCalStep >= _noOfCalibrationPoints) && (_aNotchStatus[notchIndex] == _tertiaryNotchInactive) && (currentCalStep < _noOfCalibrationPoints + _noOfAdjNotches)){//this non-diagonal notch was not calibrated
+						//skip to the next valid notch
+						currentCalStep++;
+						notchIndex = _notchAdjOrder[min(currentCalStep-_noOfCalibrationPoints, _noOfAdjNotches-1)];//limit this so it doesn't access outside the array bounds
+					}
+					if(currentCalStep >= _noOfCalibrationPoints + _noOfAdjNotches){//done adjusting notches
+						Serial.println("finished adjusting notches for the A stick");
+						EEPROM.put(_eepromAPointsX,_tempCalPointsX);
+						EEPROM.put(_eepromAPointsY,_tempCalPointsY);
+						EEPROM.put(_eepromANotchAngles,_aNotchAngles);
+						Serial.println("calibration points stored in EEPROM");
+						cleanCalPoints(_tempCalPointsX, _tempCalPointsY, _aNotchAngles, _cleanedPointsX, _cleanedPointsY, _notchPointsX, _notchPointsY, _aNotchStatus);
+						Serial.println("calibration points cleaned");
+						linearizeCal(_cleanedPointsX, _cleanedPointsY, _cleanedPointsX, _cleanedPointsY, _aFitCoeffsX, _aFitCoeffsY);
+						Serial.println("A stick linearized");
+						notchCalibrate(_cleanedPointsX, _cleanedPointsY, _notchPointsX, _notchPointsY, _noOfNotches, _aAffineCoeffs, _aBoundaryAngles);
+						advanceCal = false;
+					}
 				}
 			}
+			else if(!(hardwareL || hardwareR)) {
+				advanceCalPressed = false;
+			}
+			//check to see if we are calibrating
+			if(stickToCalibrate == calibrateAStick){
+				if(currentCalStep >= _noOfCalibrationPoints){//adjust notch angles
+					adjustNotch(currentCalStep, loopDelta, cmdButtons.Y, cmdButtons.X, cmdButtons.B, true, _measuredNotchAngles, _aNotchAngles, _aNotchStatus);
+					if(hardwareY || hardwareX || (_runButtons.B)){//only run this if the notch was adjusted
+						//clean full cal points again, feeding updated angles in
+						cleanCalPoints(_tempCalPointsX, _tempCalPointsY, _aNotchAngles, _cleanedPointsX, _cleanedPointsY, _notchPointsX, _notchPointsY, _aNotchStatus);
+						//linearize again
+						linearizeCal(_cleanedPointsX, _cleanedPointsY, _cleanedPointsX, _cleanedPointsY, _aFitCoeffsX, _aFitCoeffsY);
+						//notchCalibrate again to update the affine transform
+						notchCalibrate(_cleanedPointsX, _cleanedPointsY, _notchPointsX, _notchPointsY, _noOfNotches, _aAffineCoeffs, _aBoundaryAngles);
+					}
+				}else{//just show desired stick position
+					displayNotch(currentCalStep, true, _notchAngleDefaults);
+				}
+			}
+			else{
+				if(currentCalStep >= _noOfCalibrationPoints){//adjust notch angles
+					adjustNotch(currentCalStep, loopDelta, cmdButtons.Y, cmdButtons.X, cmdButtons.B, false, _measuredNotchAngles, _cNotchAngles, _cNotchStatus);
+					if(hardwareY || hardwareX || (_runButtons.B)){//only run this if the notch was adjusted
+						//clean full cal points again, feeding updated angles in
+						cleanCalPoints(_tempCalPointsX, _tempCalPointsY, _cNotchAngles, _cleanedPointsX, _cleanedPointsY, _notchPointsX, _notchPointsY, _cNotchStatus);
+						//linearize again
+						linearizeCal(_cleanedPointsX, _cleanedPointsY, _cleanedPointsX, _cleanedPointsY, _cFitCoeffsX, _cFitCoeffsY);
+						//notchCalibrate again to update the affine transform
+						notchCalibrate(_cleanedPointsX, _cleanedPointsY, _notchPointsX, _notchPointsY, _noOfNotches, _cAffineCoeffs, _cBoundaryAngles);
+					}
+				}else{//just show desired stick position
+					displayNotch(currentCalStep, false, _notchAngleDefaults);
+				}
+			}
+			break;
 		}
-		else if(!(hardwareL || hardwareR)) {
-			_advanceCalPressed = false;
-		}
-		break;
 	default: //mode should never get set to something else, but if it is set it back to safe mode
 		controllerMode = safeMode;
 	}
-	
 }
-
 #ifdef TEENSY4_0
 #ifndef HALFDUPLEX
 //commInt() will be called on every rising edge of a pulse that we receive
@@ -1735,7 +1791,7 @@ void readTrueButtons(Buttons &btn){
     btn.L = !digitalRead(_pinL);
     btn.R = !digitalRead(_pinR);
 }
-unsigned int  acknowledgeCmd(Buttons &displayButtons,Buttons &selectButtons, int lockTimeMs){
+unsigned int acknowledgeCmd(int lockTimeMs, Buttons &displayButtons,Buttons &selectButtons){
   setButtons(displayButtons,false);
   setButtons(selectButtons,true);
   displayButtons.Cx = (uint8_t) (255);
@@ -1763,56 +1819,6 @@ void setButtons(Buttons &thisButtons, bool allHigh){
 	thisButtons.errS = 0;
 	thisButtons.high = 1;
 }
-void freezeSticks(const int time) {
-	_runButtons.Cx = (uint8_t) (255);
-	_runButtons.Cy = (uint8_t) (255);
-	_runButtons.Ax = (uint8_t) (255);
-	_runButtons.Ay = (uint8_t) (255);
-	_runButtons.La = (uint8_t) (255 + 60.0);
-	_runButtons.Ra = (uint8_t) (255 + 60.0);
-
-	_runButtons.A = (uint8_t) 0;
-	_runButtons.B = (uint8_t) 0;
-	_runButtons.X = (uint8_t) 0;
-	_runButtons.Y = (uint8_t) 0;
-	_runButtons.L = (uint8_t) 0;
-	_runButtons.R = (uint8_t) 0;
-	_runButtons.Z = (uint8_t) 0;
-	_runButtons.S = (uint8_t) 0;
-
-	hardwareL = (uint8_t) 0;
-	hardwareR = (uint8_t) 0;
-	hardwareX = (uint8_t) 0;
-	hardwareY = (uint8_t) 0;
-	hardwareZ = (uint8_t) 0;
-
-	int startTime = millis();
-	int delta = 0;
-	while(delta < time){
-		delta = millis() - startTime;
-	}
-}
-//This clears all the buttons but doesn't overwrite the sticks or shoulder buttons.
-void clearButtons(const int time) {
-	_runButtons.A = (uint8_t) 0;
-	_runButtons.B = (uint8_t) 0;
-	_runButtons.X = (uint8_t) 0;
-	_runButtons.Y = (uint8_t) 0;
-	_runButtons.Z = (uint8_t) 0;
-	_runButtons.S = (uint8_t) 0;
-
-	hardwareL = (uint8_t) 0;
-	hardwareR = (uint8_t) 0;
-	hardwareX = (uint8_t) 0;
-	hardwareY = (uint8_t) 0;
-	hardwareZ = (uint8_t) 0;
-
-	int startTime = millis();
-	int delta = 0;
-	while(delta < time){
-		delta = millis() - startTime;
-	}
-}
 void changeRumble(const bool increase) {
 	Serial.println("changing rumble");
 	if(increase) {
@@ -1828,34 +1834,34 @@ void changeRumble(const bool increase) {
 	}
 
 	_rumblePower = calcRumblePower(_rumble);
-	showRumble(1000);
-}
-void showRumble(const int time) {
-	_runButtons.Cx = (uint8_t) 127;
-	_runButtons.Cy = (uint8_t) (_rumble + 127.5);
-	clearButtons(time);
-
 	EEPROM.put(_eepromRumble, _rumble);
 }
-void adjustSnapback(bool _change, bool _xAxis, bool _increase){
+unsigned int showRumble(int lockTimeMs, Buttons &displayButtons,Buttons &selectButtons) {
+	setButtons(displayButtons,false);
+  setButtons(selectButtons,true);
+	displayButtons.Cx = (uint8_t) 127;
+	displayButtons.Cy = (uint8_t) (_rumble + 127.5);
+	return millis() + lockTimeMs;
+}
+void adjustSnapback(bool change, bool _xAxis, bool _increase){
 	Serial.println("adjusting snapback filtering");
-	if(_xAxis && _increase && _change){
+	if(_xAxis && _increase && change){
 		_xSnapback = min(_xSnapback+1, _snapbackMax);
 		Serial.print("x snapback filtering increased to:");
 		Serial.println(_xSnapback);
 	}
-	else if(_xAxis && !_increase && _change){
+	else if(_xAxis && !_increase && change){
 		_xSnapback = max(_xSnapback-1, _snapbackMin);
 		Serial.print("x snapback filtering decreased to:");
 		Serial.println(_xSnapback);
 	}
 
-	if(!_xAxis && _increase && _change){
+	if(!_xAxis && _increase && change){
 		_ySnapback = min(_ySnapback+1, _snapbackMax);
 		Serial.print("y snapback filtering increased to:");
 		Serial.println(_ySnapback);
 	}
-	else if(!_xAxis && !_increase && _change){
+	else if(!_xAxis && !_increase && change){
 		_ySnapback = max(_ySnapback-1, _snapbackMin);
 		Serial.print("y snapback filtering decreased to:");
 		Serial.println(_ySnapback);
@@ -1864,21 +1870,15 @@ void adjustSnapback(bool _change, bool _xAxis, bool _increase){
 	_gains.xVelDamp = velDampFromSnapback(_xSnapback);
 	_gains.yVelDamp = velDampFromSnapback(_ySnapback);
 
-    //recompute the intermediate gains used directly by the kalman filter
-    recomputeGains();
-
-	_runButtons.Cx = (uint8_t) (_xSnapback + 127.5);
-	_runButtons.Cy = (uint8_t) (_ySnapback + 127.5);
-
-
-	clearButtons(2000);
+   //recompute the intermediate gains used directly by the kalman filter
+   recomputeGains();
 
 	EEPROM.put(_eepromxSnapback,_xSnapback);
 	EEPROM.put(_eepromySnapback,_ySnapback);
 }
-void adjustSmoothing(bool _change, bool _xAxis, bool _increase) {
+void adjustSmoothingA(bool change, bool _xAxis, bool _increase) {
 	Serial.println("Adjusting Smoothing");
-	if (_xAxis && _increase && _change) {
+	if (_xAxis && _increase && change) {
 		_gains.xSmoothing = _gains.xSmoothing + 0.1;
 		if(_gains.xSmoothing > _smoothingMax) {
 			_gains.xSmoothing = _smoothingMax;
@@ -1886,7 +1886,7 @@ void adjustSmoothing(bool _change, bool _xAxis, bool _increase) {
 		EEPROM.put(_eepromxSmoothing, _gains.xSmoothing);
 		Serial.print("X Smoothing increased to:");
 		Serial.println(_gains.xSmoothing);
-	} else if(_xAxis && !_increase && _change) {
+	} else if(_xAxis && !_increase && change) {
 		_gains.xSmoothing = _gains.xSmoothing - 0.1;
 		if(_gains.xSmoothing < _smoothingMin) {
 			_gains.xSmoothing = _smoothingMin;
@@ -1894,7 +1894,7 @@ void adjustSmoothing(bool _change, bool _xAxis, bool _increase) {
 		EEPROM.put(_eepromxSmoothing, _gains.xSmoothing);
 		Serial.print("X Smoothing decreased to:");
 		Serial.println(_gains.xSmoothing);
-	} else if(!_xAxis && _increase && _change) {
+	} else if(!_xAxis && _increase && change) {
 		_gains.ySmoothing = _gains.ySmoothing + 0.1;
 		if (_gains.ySmoothing > _smoothingMax) {
 			_gains.ySmoothing = _smoothingMax;
@@ -1902,7 +1902,7 @@ void adjustSmoothing(bool _change, bool _xAxis, bool _increase) {
 		EEPROM.put(_eepromySmoothing, _gains.ySmoothing);
 		Serial.print("Y Smoothing increased to:");
 		Serial.println(_gains.ySmoothing);
-	} else if(!_xAxis && !_increase && _change) {
+	} else if(!_xAxis && !_increase && change) {
 		_gains.ySmoothing = _gains.ySmoothing - 0.1;
 		if (_gains.ySmoothing < _smoothingMin) {
 			_gains.ySmoothing = _smoothingMin;
@@ -1914,26 +1914,10 @@ void adjustSmoothing(bool _change, bool _xAxis, bool _increase) {
 
 	//recompute the intermediate gains used directly by the kalman filter
 	recomputeGains();
-
-	_runButtons.Cx = (uint8_t) (127.5 + (_gains.xSmoothing * 10));
-	_runButtons.Cy = (uint8_t) (127.5 + (_gains.ySmoothing * 10));
-
-	clearButtons(2000);
 }
-void showAstickSettings() {
-	//Snapback on A-stick
-	_runButtons.Ax = (uint8_t) (_xSnapback + 127.5);
-	_runButtons.Ay = (uint8_t) (_ySnapback + 127.5);
-
-	//Smoothing on C-stick
-	_runButtons.Cx = (uint8_t) (127.5 + (_gains.xSmoothing * 10));
-	_runButtons.Cy = (uint8_t) (127.5 + (_gains.ySmoothing * 10));
-
-	clearButtons(2000);
-}
-void adjustCstickSmoothing(bool _change, bool _xAxis, bool _increase) {
+void adjustSmoothingC(bool change, bool _xAxis, bool _increase) {
 	Serial.println("Adjusting C-Stick Smoothing");
-	if (_xAxis && _increase && _change) {
+	if (_xAxis && _increase && change) {
 		_gains.cXSmoothing = _gains.cXSmoothing + 0.1;
 		if(_gains.cXSmoothing > _smoothingMax) {
 			_gains.cXSmoothing = _smoothingMax;
@@ -1941,7 +1925,7 @@ void adjustCstickSmoothing(bool _change, bool _xAxis, bool _increase) {
 		EEPROM.put(_eepromCxSmoothing, _gains.cXSmoothing);
 		Serial.print("C-Stick X Smoothing increased to:");
 		Serial.println(_gains.cXSmoothing);
-	} else if(_xAxis && !_increase && _change) {
+	} else if(_xAxis && !_increase && change) {
 		_gains.cXSmoothing = _gains.cXSmoothing - 0.1;
 		if(_gains.cXSmoothing < _smoothingMin) {
 			_gains.cXSmoothing = _smoothingMin;
@@ -1949,7 +1933,7 @@ void adjustCstickSmoothing(bool _change, bool _xAxis, bool _increase) {
 		EEPROM.put(_eepromCxSmoothing, _gains.cXSmoothing);
 		Serial.print("C-Stick X Smoothing decreased to:");
 		Serial.println(_gains.cXSmoothing);
-	} else if(!_xAxis && _increase && _change) {
+	} else if(!_xAxis && _increase && change) {
 		_gains.cYSmoothing = _gains.cYSmoothing + 0.1;
 		if (_gains.cYSmoothing > _smoothingMax) {
 			_gains.cYSmoothing = _smoothingMax;
@@ -1957,7 +1941,7 @@ void adjustCstickSmoothing(bool _change, bool _xAxis, bool _increase) {
 		EEPROM.put(_eepromCySmoothing, _gains.cYSmoothing);
 		Serial.print("C-Stick Y Smoothing increased to:");
 		Serial.println(_gains.cYSmoothing);
-	} else if(!_xAxis && !_increase && _change) {
+	} else if(!_xAxis && !_increase && change) {
 		_gains.cYSmoothing = _gains.cYSmoothing - 0.1;
 		if (_gains.cYSmoothing < _smoothingMin) {
 			_gains.cYSmoothing = _smoothingMin;
@@ -1970,14 +1954,10 @@ void adjustCstickSmoothing(bool _change, bool _xAxis, bool _increase) {
 	//recompute the intermediate gains used directly by the kalman filter
 	recomputeGains();
 
-	_runButtons.Cx = (uint8_t) (127.5 + (_gains.cXSmoothing * 10));
-	_runButtons.Cy = (uint8_t) (127.5 + (_gains.cYSmoothing * 10));
-
-	clearButtons(2000);
 }
-void adjustCstickOffset(bool _change, bool _xAxis, bool _increase) {
+void adjustCstickOffset(bool change, bool _xAxis, bool _increase) {
 	Serial.println("Adjusting C-stick Offset");
-	if(_xAxis && _increase && _change) {
+	if(_xAxis && _increase && change) {
 		_cXOffset++;
 		if(_cXOffset > _cMax) {
 			_cXOffset = _cMax;
@@ -1985,7 +1965,7 @@ void adjustCstickOffset(bool _change, bool _xAxis, bool _increase) {
 		EEPROM.put(_eepromcXOffset, _cXOffset);
 		Serial.print("X offset increased to:");
 		Serial.println(_cXOffset);
-	} else if(_xAxis && !_increase && _change) {
+	} else if(_xAxis && !_increase && change) {
 		_cXOffset--;
 		if(_cXOffset < _cMin) {
 			_cXOffset = _cMin;
@@ -1993,7 +1973,7 @@ void adjustCstickOffset(bool _change, bool _xAxis, bool _increase) {
 		EEPROM.put(_eepromcXOffset, _cXOffset);
 		Serial.print("X offset decreased to:");
 		Serial.println(_cXOffset);
-	} else if(!_xAxis && _increase && _change) {
+	} else if(!_xAxis && _increase && change) {
 		_cYOffset++;
 		if(_cYOffset > _cMax) {
 			_cYOffset = _cMax;
@@ -2001,7 +1981,7 @@ void adjustCstickOffset(bool _change, bool _xAxis, bool _increase) {
 		EEPROM.put(_eepromcYOffset, _cYOffset);
 		Serial.print("Y offset increased to:");
 		Serial.println(_cYOffset);
-	} else if(!_xAxis && !_increase && _change) {
+	} else if(!_xAxis && !_increase && change) {
 		_cYOffset--;
 		if(_cYOffset < _cMin) {
 			_cYOffset = _cMin;
@@ -2010,40 +1990,44 @@ void adjustCstickOffset(bool _change, bool _xAxis, bool _increase) {
 		Serial.print("Y offset decreased to:");
 		Serial.println(_cYOffset);
 	}
-
-	_runButtons.Cx = (uint8_t) (127.5 + _cXOffset);
-	_runButtons.Cy = (uint8_t) (127.5 + _cYOffset);
-
-	clearButtons(2000);
 }
-void showCstickSettings() {
-	//Snapback/smoothing on A-stick
-	_runButtons.Ax = (uint8_t) (127.5 + (_gains.cXSmoothing * 10));
-	_runButtons.Ay = (uint8_t) (127.5 + (_gains.cYSmoothing * 10));
+unsigned int showOnCStick( int lockTimeMs, float xVal, float yVal, Buttons &displayButtons,Buttons &selectButtons){
+	setButtons(displayButtons,false);
+  setButtons(selectButtons,true);
 
-	//Smoothing on C-stick
-	_runButtons.Cx = (uint8_t) (127.5 + _cXOffset);
-	_runButtons.Cy = (uint8_t) (127.5 + _cYOffset);
-
-	clearButtons(2000);
+	displayButtons.Cx = (uint8_t) (127.5 + xVal);
+	displayButtons.Cy = (uint8_t) (127.5 + yVal);
+	
+	return millis() + lockTimeMs;
 }
-void adjustTriggerOffset(bool _change, bool _lTrigger, bool _increase) {
-	if(_lTrigger && _increase && _change) {
+unsigned int showOnBothSticks( int lockTimeMs, float xValA, float yValA,float xValC, float yValC, Buttons &displayButtons,Buttons &selectButtons){
+	setButtons(displayButtons,false);
+  setButtons(selectButtons,true);
+	
+	displayButtons.Ax = (uint8_t) (127.5 + xValA);
+	displayButtons.Ay = (uint8_t) (127.5 + yValA);
+	displayButtons.Cx = (uint8_t) (127.5 + xValC);
+	displayButtons.Cy = (uint8_t) (127.5 + yValC);
+	
+	return millis() + lockTimeMs;
+}
+void adjustTriggerOffset(bool change, bool _lTrigger, bool _increase) {
+	if(_lTrigger && _increase && change) {
 		_LTriggerOffset++;
 		if(_LTriggerOffset > _triggerMax) {
 			_LTriggerOffset = _triggerMax;
 		}
-	} else if(_lTrigger && !_increase && _change) {
+	} else if(_lTrigger && !_increase && change) {
 		_LTriggerOffset--;
 		if(_LTriggerOffset < _triggerMin) {
 			_LTriggerOffset = _triggerMin;
 		}
-	} else if(!_lTrigger && _increase && _change) {
+	} else if(!_lTrigger && _increase && change) {
 		_RTriggerOffset++;
 		if(_RTriggerOffset > _triggerMax) {
 			_RTriggerOffset = _triggerMax;
 		}
-	} else if(!_lTrigger && !_increase && _change) {
+	} else if(!_lTrigger && !_increase && change) {
 		_RTriggerOffset--;
 		if(_RTriggerOffset < _triggerMin) {
 			_RTriggerOffset = _triggerMin;
@@ -2052,21 +2036,25 @@ void adjustTriggerOffset(bool _change, bool _lTrigger, bool _increase) {
 
 	EEPROM.put(_eepromLOffset, _LTriggerOffset);
 	EEPROM.put(_eepromROffset, _RTriggerOffset);
-
-	if(_LTriggerOffset > 99) {
-		_runButtons.Ax = (uint8_t) (127.5 + 100);
-		_runButtons.Cx = (uint8_t) (127.5 + _LTriggerOffset-100);
+}
+unsigned int showTriggerOffset(int lockTimeMs, int leftOffset, int rightOffset, Buttons &displayButtons,Buttons &selectButtons){
+	setButtons(displayButtons,false);
+  setButtons(selectButtons,true);
+	
+	if(leftOffset > 99) {
+		displayButtons.Ax = (uint8_t) (127.5 + 100);
+		displayButtons.Cx = (uint8_t) (127.5 + leftOffset-100);
 	} else {
-		_runButtons.Cx = (uint8_t) (127.5 + _LTriggerOffset);
+		displayButtons.Cx = (uint8_t) (127.5 + leftOffset);
 	}
-	if(_RTriggerOffset > 99) {
-		_runButtons.Ay = (uint8_t) (127.5 + 100);
-		_runButtons.Cy = (uint8_t) (127.5 + _RTriggerOffset-100);
+	if(rightOffset > 99) {
+		displayButtons.Ay = (uint8_t) (127.5 + 100);
+		displayButtons.Cy = (uint8_t) (127.5 + rightOffset-100);
 	} else {
-		_runButtons.Cy = (uint8_t) (127.5 + _RTriggerOffset);
+		displayButtons.Cy = (uint8_t) (127.5 + rightOffset);
 	}
-
-	clearButtons(250);
+	
+	return millis() + lockTimeMs;
 }
 void readJumpConfig(bool _swapXZ, bool _swapYZ){
 	Serial.print("setting jump to: ");
@@ -3168,8 +3156,6 @@ void runKalman(const float xZ,const float yZ){
 		_yPosFilt = _yPos;
 	}
 }
-
-
 void print_mtxf(const Eigen::MatrixXf& X){
    int i, j, nrow, ncol;
    nrow = X.rows();
