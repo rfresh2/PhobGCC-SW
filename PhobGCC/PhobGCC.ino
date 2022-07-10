@@ -70,18 +70,6 @@ Buttons _runButtons;
 Buttons _displayButtons;
 Buttons _selectButtons;
 
-uint8_t hardwareL;
-uint8_t hardwareR;
-uint8_t hardwareZ;
-uint8_t hardwareX;
-uint8_t hardwareY;
-
-float _aStickX;
-float _aStickY;
-float _cStickX;
-float _cStickY;
-
-
 //defining control configuration
 int _pinZSwappable = _pinZ;
 int _pinXSwappable = _pinX;
@@ -89,18 +77,20 @@ int _pinYSwappable = _pinY;
 int _jumpConfig = 0;
 int _lConfig = 0;
 int _rConfig = 0;
-int _triggerDefault = 0;
+const int _triggerDefault = 0;
 int _lTrigger = 0;
 int _rTrigger = 1;
 bool _changeTrigger = true;
 int _cXOffset = 0;
 int _cYOffset = 0;
-int _cMax = 127;
-int _cMin = -127;
+const int _cMax = 127;
+const int _cMin = -127;
 int _LTriggerOffset = 49;
 int _RTriggerOffset = 49;
-int _triggerMin = 49;
-int _triggerMax = 227;
+const int _triggerMin = 49;
+const int _triggerMax = 227;
+int _startUpLa,_startUpRa;
+
 //rumble config; 0 is off, nonzero is on. Higher values are stronger, max 7
 int _rumble = 5;
 int calcRumblePower(const int rumble){
@@ -110,11 +100,11 @@ int _rumblePower = calcRumblePower(_rumble);
 const int _rumbleMin = 0;
 const int _rumbleMax = 7;
 const int _rumbleDefault = 5;
+const int _defaultLockTime = 2000;
+const int _originLockTime = 100;
 
-int _startUpLa,_startUpRa;
 
 ///// Values used for adjusting snapback in the CarVac Filter
-
 int _xSnapback = 1;
 int _ySnapback = 1;
 const float _snapbackMin = 0;
@@ -181,11 +171,6 @@ FilterGains _gains {//these values are actually timestep-compensated for in runK
     .cYSmoothing = 0.0
 };
 FilterGains _g;//this gets filled by recomputeGains();
-
-//////values used to determine how much large of a region will count as being "in a notch"
-
-const float _marginAngle = 1.50/100.0; //angle range(+/-) in radians that will be collapsed down to the ideal angle
-const float _tightAngle = 0.1/100.0;//angle range(+/-) in radians that the margin region will be collapsed down to, found that having a small value worked better for the transform than 0
 
 //////values used for calibration
 const uint8_t _analogCenter = 127;
@@ -264,16 +249,7 @@ const int _eepromCxSmoothing = _eepromROffset+_bytesPerFloat;
 const int _eepromCySmoothing = _eepromCxSmoothing+_bytesPerFloat;
 const int _eepromRumble = _eepromCySmoothing+_bytesPerFloat;
 
-Bounce bounceDr = Bounce();
-Bounce bounceDu = Bounce();
-Bounce bounceDl = Bounce();
-Bounce bounceDd = Bounce();
-
 ADC *adc = new ADC();
-
-
-unsigned int _lastMicros;
-float _dT;
 
 //The median filter can be either length 3, 4, or 5.
 #define MEDIANLEN 5
@@ -284,18 +260,6 @@ float _yPosList[MEDIANLEN];//for median filtering
 unsigned int _xMedianIndex;
 unsigned int _yMedianIndex;
 
-//new kalman filter state variables
-float _xPos;//input of kalman filter
-float _yPos;//input of kalman filter
-float _xPosFilt;//output of kalman filter
-float _yPosFilt;//output of kalman filter
-float _xVel;
-float _yVel;
-float _xVelFilt;
-float _yVelFilt;
-//simple low pass filter state variable for c-stick
-float _cXPos;
-float _cYPos;
 
 #ifdef TEENSY3_2
 const int _cmdLengthShort = 5; //number or serial bytes (2 bits per byte) in a short command - 8 bits + stopbit = 5 bytes
@@ -345,19 +309,14 @@ const int _commWrite = 3;
 
 #ifdef TEENSY4_0
 ////Serial settings
-bool _writing = false;
-bool _waiting = false;
-int _bitQueue = 8;
-int _waitQueue = 0;
-int _writeQueue = 0;
+
 const int _fastBaud = 2500000;
 const int _slowBaud = 2000000;
 const int _probeLength = 24;
 const int _originLength = 80;
 const int _pollLength = 64;
-static char _serialBuffer[128];
-int _errorCount = 0;
-int _reportCount = 0;
+char _serialBuffer[128];
+
 const uint8_t joybusLong = 0b11000000;
 const uint8_t joybusShort = 0b11111100;
 const uint8_t joybusThesh = 0b11110000;
@@ -384,7 +343,7 @@ char _commResponse[_originLength] = {
 void setup() {
 	serialSetup();
 	#ifdef BUILD_RELEASE
-	Serial.println("Software version 0.22");
+	Serial.println("Software version 0.23");
 	#endif
 	#ifdef BUILD_DEV
 	Serial.println("This is not a stable version");
@@ -398,19 +357,6 @@ void setup() {
 	}
 	_xMedianIndex = 0;
 	_yMedianIndex = 0;
-
-	_xPos = 0;
-	_yPos = 0;
-	_xPosFilt = 0;
-	_yPosFilt = 0;
-	_xVel = 0;
-	_yVel = 0;
-	_xVelFilt = 0;
-	_yVelFilt = 0;
-	_cXPos = 0;
-	_cYPos = 0;
-
-	_lastMicros = micros();
 
 	setPinModes();
 
@@ -452,13 +398,11 @@ void setup() {
  */
 void loop() {
 
-	//read the controllers buttons
+	//read the controllers digital inputs and deal with any commands
 	handleCommands(_displayButtons,_selectButtons);
 
-	
-	
-	//if not calibrating read the sticks normally
-	readSticks(true,true);
+	//set the controllers analog inputs
+	readAnalog(_runButtons);
 
 }
 /*
@@ -470,8 +414,6 @@ void handleCommands(Buttons &displayButtons,Buttons &selectButtons){
 	static unsigned int lastCommandTime = millis();
 	unsigned int loopDelta;
 
-  static bool lockout = false;
-  static unsigned int lockoutTimer;
 	static int currentCalStep = 0;
 	static bool advanceCal = false;
 	static bool advanceCalPressed = false;
@@ -489,24 +431,10 @@ void handleCommands(Buttons &displayButtons,Buttons &selectButtons){
 	constexpr int calibrateMode = 4;
 	static int controllerMode = startMode;
 	
-	constexpr int defaultLockTime = 2000;
-	
   Buttons cmdButtons;
 	
 	loopDelta = millis() - lastCommandTime;
 	lastCommandTime = millis();
-	
-  if(lockout){ //freeze the outputs for a bit to display something
-		int remainingLockTime = lockoutTimer - millis();
-		if(remainingLockTime < 0){
-			lockout = false;
-			//Serial.print("unlocked");
-		}
-		else{
-			//Serial.print("locked");
-			return;
-    }
-  }
 	
 	//get the true state of the digital inputs
 	readTrueButtons(cmdButtons);
@@ -559,8 +487,8 @@ void handleCommands(Buttons &displayButtons,Buttons &selectButtons){
 			//handle the couple commands we need to worry about in safe mode
 			if(cmdButtons.A && cmdButtons.X && cmdButtons.Y && cmdButtons.S) { //Disable safe mode
 				controllerMode = configMode;
-				lockoutTimer = acknowledgeCmd(defaultLockTime,displayButtons,selectButtons);
-				lockout = true;
+				acknowledgeCmd(_defaultLockTime,displayButtons,selectButtons);
+
 			}
 			else if(cmdButtons.L && cmdButtons.R && cmdButtons.A && cmdButtons.S) { //LRA+Start to quit a game, this is done here to make it ignore Z-Jump swap
 				//set all the displayButtons to zero
@@ -572,8 +500,8 @@ void handleCommands(Buttons &displayButtons,Buttons &selectButtons){
 				displayButtons.S = 1;
 				
 				//short lockout to ensure the output is read by melee
-				lockoutTimer = acknowledgeCmd(100,displayButtons,selectButtons);
-				lockout = true;
+				acknowledgeCmd(100,displayButtons,selectButtons);
+
 			}
 			break;
 		}
@@ -581,42 +509,39 @@ void handleCommands(Buttons &displayButtons,Buttons &selectButtons){
 		{
 			if(cmdButtons.B){
 				controllerMode = safeMode;
-				lockoutTimer = acknowledgeCmd(500,displayButtons,selectButtons);
-				lockout = true;
+				acknowledgeCmd(500,displayButtons,selectButtons);
+
 			}
 			break;
 		}
 		case configMode: //in config mode need to check for all of our various command inputs
 		{
-				//not calibrating, so we want to see the raw controller inputs
 				setButtons(selectButtons,false);
 				if(cmdButtons.A && cmdButtons.X && cmdButtons.Y && cmdButtons.S) { //return to safeMode
 					controllerMode = safeMode;
-					lockoutTimer = acknowledgeCmd(defaultLockTime*2,displayButtons,selectButtons);
-					lockout = true;
+					acknowledgeCmd(_defaultLockTime*2,displayButtons,selectButtons);
+	
 				}
 				else if (cmdButtons.A && cmdButtons.B && cmdButtons.Z && cmdButtons.S) { //Hard Reset
 					resetDefaults();
-					lockoutTimer = acknowledgeCmd(defaultLockTime*2,displayButtons,selectButtons);
-					lockout = true;
+					acknowledgeCmd(_defaultLockTime*2,displayButtons,selectButtons);
+	
 				}
 				else if (cmdButtons.X && cmdButtons.Y && cmdButtons.Du) { //Increase Rumble
 #ifdef RUMBLE
-					changeRumble(true);
+					adjustRumble(true,displayButtons,selectButtons);
 #endif // RUMBLE
-					lockoutTimer = showOnCStick(defaultLockTime,0,_rumble,displayButtons,selectButtons);
-					lockout = true;
+					acknowledgeCmd(_defaultLockTime,displayButtons,selectButtons);
 				}
 				else if (cmdButtons.X && cmdButtons.Y && cmdButtons.Dd) { //Decrease Rumble
 #ifdef RUMBLE
-					changeRumble(false);
+					adjustRumble(false,displayButtons,selectButtons);
 #endif // RUMBLE
-					lockoutTimer = showOnCStick(defaultLockTime,0,_rumble,displayButtons,selectButtons);
-					lockout = true;
+					acknowledgeCmd(_defaultLockTime,displayButtons,selectButtons);
 				}
 				else if (cmdButtons.X && cmdButtons.Y && cmdButtons.B && !cmdButtons.A) { //Show current rumble setting
-					lockoutTimer = showOnCStick(defaultLockTime,0,_rumble,displayButtons,selectButtons);
-					lockout = true;
+					showOnCStick(_defaultLockTime,0,_rumble,displayButtons,selectButtons);
+	
 				}
 				else if (cmdButtons.A && cmdButtons.X && cmdButtons.Y && cmdButtons.L) { //Analog Calibration
 					Serial.println("Calibrating the A stick");
@@ -624,8 +549,9 @@ void handleCommands(Buttons &displayButtons,Buttons &selectButtons){
 					stickToCalibrate = calibrateAStick;
 					currentCalStep = 0;
 					advanceCal = true;
-					lockoutTimer = acknowledgeCmd(defaultLockTime,displayButtons,selectButtons);
-					lockout = true;
+					acknowledgeCmd(_defaultLockTime,displayButtons,selectButtons);
+					setButtons(selectButtons,false);
+					setButtons(displayButtons,false);
 				}
 				else if (cmdButtons.A && cmdButtons.X && cmdButtons.Y && cmdButtons.R) { //C-stick Calibration
 					Serial.println("Calibrating the C stick");
@@ -633,149 +559,98 @@ void handleCommands(Buttons &displayButtons,Buttons &selectButtons){
 					stickToCalibrate = calibrateCStick;
 					currentCalStep = 0;
 					advanceCal = true;
-					lockoutTimer = acknowledgeCmd(defaultLockTime,displayButtons,selectButtons);
-					lockout = true;
+					acknowledgeCmd(_defaultLockTime,displayButtons,selectButtons);
+					setButtons(selectButtons,false);
+					setButtons(displayButtons,false);
 				}
 				else if(cmdButtons.L && cmdButtons.X && cmdButtons.Du) { //Increase Analog X-Axis Snapback Filtering
-					adjustSnapback(true, true, true);
-					lockoutTimer = showOnCStick(defaultLockTime,_xSnapback,_ySnapback,displayButtons,selectButtons);
-					lockout = true;
+					adjustSnapback(true, true,displayButtons,selectButtons);
 				}
 				else if(cmdButtons.L && cmdButtons.X && cmdButtons.Dd) { //Decrease Analog X-Axis Snapback Filtering
-					adjustSnapback(true, true, false);
-					lockoutTimer = showOnCStick(defaultLockTime,_xSnapback,_ySnapback,displayButtons,selectButtons);
-					lockout = true;
+					adjustSnapback(true, false,displayButtons,selectButtons);
 				}
 				else if(cmdButtons.L && cmdButtons.Y && cmdButtons.Du) { //Increase Analog Y-Axis Snapback Filtering
-					adjustSnapback(true, false, true);
-					lockoutTimer = showOnCStick(defaultLockTime,_xSnapback,_ySnapback,displayButtons,selectButtons);
-					lockout = true;
+					adjustSnapback(false, true,displayButtons,selectButtons);
 				}
 				else if(cmdButtons.L && cmdButtons.Y && cmdButtons.Dd) { //Decrease Analog Y-Axis Snapback Filtering
-					adjustSnapback(true, false, false);
-					lockoutTimer = showOnCStick(defaultLockTime,_xSnapback,_ySnapback,displayButtons,selectButtons);
-					lockout = true;
+					adjustSnapback(false, false,displayButtons,selectButtons);
 				}
 				else if(cmdButtons.L && cmdButtons.A && cmdButtons.Du) { //Increase X-axis Delay
-					adjustSmoothingA(true, true, true);
-					lockoutTimer = showOnCStick(defaultLockTime,_gains.xSmoothing*10,_gains.ySmoothing*10,displayButtons,selectButtons);
-					lockout = true;
+					adjustSmoothingA(true, true,displayButtons,selectButtons);
 				}
 				else if(cmdButtons.L && cmdButtons.A && cmdButtons.Dd) { //Decrease X-axis Delay
-					adjustSmoothingA(true, true, false);
-					lockoutTimer = showOnCStick(defaultLockTime,_gains.xSmoothing*10,_gains.ySmoothing*10,displayButtons,selectButtons);
-					lockout = true;
+					adjustSmoothingA(true, false,displayButtons,selectButtons);
 				}
 				else if(cmdButtons.L && cmdButtons.B && cmdButtons.Du) { //Increase Y-axis Delay
-					adjustSmoothingA(true, false, true);
-					lockoutTimer = showOnCStick(defaultLockTime,_gains.xSmoothing*10,_gains.ySmoothing*10,displayButtons,selectButtons);
-					lockout = true;
+					adjustSmoothingA(false, true,displayButtons,selectButtons);
 				}
 				else if(cmdButtons.L && cmdButtons.B && cmdButtons.Dd) { //Decrease Y-axis Delay
-					adjustSmoothingA(true, false, false);
-					lockoutTimer = showOnCStick(defaultLockTime,_gains.xSmoothing*10,_gains.ySmoothing*10,displayButtons,selectButtons);
-					lockout = true;
+					adjustSmoothingA(false, false,displayButtons,selectButtons);
 				}
 				else if(cmdButtons.L && cmdButtons.S && cmdButtons.Dd) { //Show Current Analog Settings
-					lockoutTimer = showOnBothSticks(defaultLockTime,_xSnapback,_ySnapback,_gains.xSmoothing*10,_gains.ySmoothing*10,displayButtons,selectButtons);
-					lockout = true;
+					showOnlyAnalog(_defaultLockTime,_xSnapback,_ySnapback,_gains.xSmoothing*10,_gains.ySmoothing*10,_startUpLa,_startUpRa,displayButtons,selectButtons);
 				}
 				else if(cmdButtons.R && cmdButtons.X && cmdButtons.Du) { //Increase C-stick X-Axis Snapback Filtering
-					adjustSmoothingC(true, true, true);
-					lockoutTimer = showOnCStick(defaultLockTime,_gains.cXSmoothing*10,_gains.cYSmoothing*10,displayButtons,selectButtons);
-					lockout = true;
+					adjustSmoothingC(true, true,displayButtons,selectButtons);
 				}
 				else if(cmdButtons.R && cmdButtons.X && cmdButtons.Dd) { //Decrease C-stick X-Axis Snapback Filtering
-					adjustSmoothingC(true, true, false);
-					lockoutTimer = showOnCStick(defaultLockTime,_gains.cXSmoothing*10,_gains.cYSmoothing*10,displayButtons,selectButtons);
-					lockout = true;
-					
+					adjustSmoothingC(true, false,displayButtons,selectButtons);
 				}
 				else if(cmdButtons.R && cmdButtons.Y && cmdButtons.Du) { //Increase C-stick Y-Axis Snapback Filtering
-					adjustSmoothingC(true, false, true);
-					lockoutTimer = showOnCStick(defaultLockTime,_gains.cXSmoothing*10,_gains.cYSmoothing*10,displayButtons,selectButtons);
-					lockout = true;
+					adjustSmoothingC(false, true,displayButtons,selectButtons);
 				}
 				else if(cmdButtons.R && cmdButtons.Y && cmdButtons.Dd) { //Decrease C-stick Y-Axis Snapback Filtering
-					adjustSmoothingC(true, false, false);
-					lockoutTimer = showOnCStick(defaultLockTime,_gains.cXSmoothing*10,_gains.cYSmoothing*10,displayButtons,selectButtons);
-					lockout = true;
+					adjustSmoothingC(false, false,displayButtons,selectButtons);
 				}
 				else if(cmdButtons.R && cmdButtons.A && cmdButtons.Du) { //Increase C-stick X Offset
-					adjustCstickOffset(true, true, true);
-					lockoutTimer = showOnCStick(defaultLockTime,_cXOffset,_cYOffset,displayButtons,selectButtons);
-					lockout = true;
+					adjustCstickOffset(true, true,displayButtons,selectButtons);
 				}
 				else if(cmdButtons.R && cmdButtons.A && cmdButtons.Dd) { //Decrease C-stick X Offset
-					adjustCstickOffset(true, true, false);
-					lockoutTimer = showOnCStick(defaultLockTime,_cXOffset,_cYOffset,displayButtons,selectButtons);
-					lockout = true;
+					adjustCstickOffset(true, false,displayButtons,selectButtons);
 				}
 				else if(cmdButtons.R && cmdButtons.B && cmdButtons.Du) { //Increase C-stick Y Offset
-					adjustCstickOffset(true, false, true);
-					lockoutTimer = showOnCStick(defaultLockTime,_cXOffset,_cYOffset,displayButtons,selectButtons);
-					lockout = true;
+					adjustCstickOffset(false, true,displayButtons,selectButtons);
 				}
 				else if(cmdButtons.R && cmdButtons.B && cmdButtons.Dd) { //Decrease C-stick Y Offset
-					adjustCstickOffset(true, false, false);
-					lockoutTimer = showOnCStick(defaultLockTime,_cXOffset,_cYOffset,displayButtons,selectButtons);
-					lockout = true;
+					adjustCstickOffset(false, false,displayButtons,selectButtons);
 				}
 				else if(cmdButtons.R && cmdButtons.S && cmdButtons.Dd) { //Show Current C-stick Settings
-					lockoutTimer = showOnBothSticks(defaultLockTime,_gains.cXSmoothing * 10,_gains.cYSmoothing * 10,_cXOffset,_cYOffset,displayButtons,selectButtons);
-					lockout = true;
+					showOnlyAnalog(_defaultLockTime,_gains.cXSmoothing * 10,_gains.cYSmoothing * 10,_cXOffset,_cYOffset,_startUpLa,_startUpRa,displayButtons,selectButtons);
 				}
 				else if(cmdButtons.L && cmdButtons.Z && cmdButtons.S) { //Toggle Analog L
-					nextTriggerState(_lConfig, true);
-					lockoutTimer = acknowledgeCmd(defaultLockTime,displayButtons,selectButtons);
-					lockout = true;
+					nextTriggerState(_lConfig, true,displayButtons,selectButtons);
 				}
 				else if(cmdButtons.R && cmdButtons.Z && cmdButtons.S) { //Toggle Analog R
-					nextTriggerState(_rConfig, false);
-					lockoutTimer = acknowledgeCmd(defaultLockTime,displayButtons,selectButtons);
-					lockout = true;
+					nextTriggerState(_rConfig, false,displayButtons,selectButtons);
 				}
 				else if(cmdButtons.L && cmdButtons.Z && cmdButtons.Du) { //Increase L-Trigger Offset
-					adjustTriggerOffset(true, true, true);
-					lockoutTimer = showTriggerOffset(defaultLockTime,_LTriggerOffset,_RTriggerOffset,displayButtons,selectButtons);
-					lockout = true;
+					adjustTriggerOffset(true, true,displayButtons,selectButtons);
 				}
 				else if(cmdButtons.L && cmdButtons.Z && cmdButtons.Dd) { //Decrease L-trigger Offset
-					adjustTriggerOffset(true, true, false);
-					lockoutTimer = showTriggerOffset(defaultLockTime,_LTriggerOffset,_RTriggerOffset,displayButtons,selectButtons);
-					lockout = true;
+					adjustTriggerOffset(true, false,displayButtons,selectButtons);
 				}
 				else if(cmdButtons.R && cmdButtons.Z && cmdButtons.Du) { //Increase R-trigger Offset
-					adjustTriggerOffset(true, false, true);
-					lockoutTimer = showTriggerOffset(defaultLockTime,_LTriggerOffset,_RTriggerOffset,displayButtons,selectButtons);
-					lockout = true;
+					adjustTriggerOffset(false, true,displayButtons,selectButtons);
 				}
 				else if(cmdButtons.R && cmdButtons.Z && cmdButtons.Dd) { //Decrease R-trigger Offset
-					adjustTriggerOffset(true, false, false);
-					lockoutTimer = showTriggerOffset(defaultLockTime,_LTriggerOffset,_RTriggerOffset,displayButtons,selectButtons);
-					lockout = true;
+					adjustTriggerOffset(false, false,displayButtons,selectButtons);
 				}
 				else if(cmdButtons.X && cmdButtons.Z && cmdButtons.S) { //Swap X and Z
-					readJumpConfig(true, false);
-					lockoutTimer = acknowledgeCmd(defaultLockTime,displayButtons,selectButtons);
-					lockout = true;
+					adjustJumpConfig(true, false,displayButtons,selectButtons);
 				}
 				else if(cmdButtons.Y && cmdButtons.Z && cmdButtons.S) { //Swap Y and Z
-					readJumpConfig(false, true);
-					lockoutTimer = acknowledgeCmd(defaultLockTime,displayButtons,selectButtons);
-					lockout = true;
+					adjustJumpConfig(false, true,displayButtons,selectButtons);
 				}
 				else if(cmdButtons.A && cmdButtons.X && cmdButtons.Y && cmdButtons.Z) { // Reset X/Y/Z Config
-					readJumpConfig(false, false);
-					lockoutTimer = acknowledgeCmd(defaultLockTime,displayButtons,selectButtons);
-					lockout = true;
+					adjustJumpConfig(false, false,displayButtons,selectButtons);
 				}
 				break;
 		}
 		case calibrateMode:
 		{
 			//Skip stick measurement and go to notch adjust using the start button while calibrating
-			if(cmdButtons.S  && currentCalStep < (_noOfNotches*2)){ 
+			if(cmdButtons.S  && (currentCalStep < (_noOfNotches*2))){
+				Serial.println("skipping measurement");
 				currentCalStep = _noOfCalibrationPoints;
 				//Do the same thing we would have done at step 32 had we actually collected the points, but with stored tempCalPoints
 				if(stickToCalibrate == calibrateCStick){
@@ -842,6 +717,7 @@ void handleCommands(Buttons &displayButtons,Buttons &selectButtons){
 			}
 			//Undo Calibration using Z-button
 			else if(cmdButtons.Z && undoCal && !undoCalPressed) {
+				Serial.println("undoing step");
 				undoCalPressed = true;
 				if(currentCalStep % 2 == 0 && currentCalStep < 32 && currentCalStep != 0 ) {
 					//If it's measuring zero, go back to the previous zero
@@ -870,11 +746,10 @@ void handleCommands(Buttons &displayButtons,Buttons &selectButtons){
 						notchIndex = _notchAdjOrder[min(currentCalStep-_noOfCalibrationPoints, _noOfAdjNotches-1)];//limit this so it doesn't access outside the array bounds
 					}
 				}
-			} else if(!hardwareZ) {
-				undoCalPressed = false;
 			}
 			//Advance Calibration Using L or R triggers
 			else if((cmdButtons.L || cmdButtons.R) && advanceCal && !advanceCalPressed){
+				Serial.println("a");
 				advanceCalPressed = true;
 				if (stickToCalibrate == calibrateCStick){
 					if(currentCalStep < _noOfCalibrationPoints){//still collecting points
@@ -931,8 +806,8 @@ void handleCommands(Buttons &displayButtons,Buttons &selectButtons){
 						linearizeCal(_cleanedPointsX, _cleanedPointsY, _cleanedPointsX, _cleanedPointsY, _cFitCoeffsX, _cFitCoeffsY);
 						Serial.println("C stick linearized");
 						notchCalibrate(_cleanedPointsX, _cleanedPointsY, _notchPointsX, _notchPointsY, _noOfNotches, _cAffineCoeffs, _cBoundaryAngles);
-						currentCalStep = 0;
 						advanceCal = false;
+						controllerMode = configMode;
 					}
 				}
 				else if (stickToCalibrate == calibrateAStick){
@@ -992,17 +867,23 @@ void handleCommands(Buttons &displayButtons,Buttons &selectButtons){
 						Serial.println("A stick linearized");
 						notchCalibrate(_cleanedPointsX, _cleanedPointsY, _notchPointsX, _notchPointsY, _noOfNotches, _aAffineCoeffs, _aBoundaryAngles);
 						advanceCal = false;
+						controllerMode = configMode;
 					}
 				}
 			}
-			else if(!(hardwareL || hardwareR)) {
+			
+			if(!(cmdButtons.L || cmdButtons.R)) {
 				advanceCalPressed = false;
+			}
+			
+			if(!cmdButtons.Z) {
+				undoCalPressed = false;
 			}
 			//check to see if we are calibrating
 			if(stickToCalibrate == calibrateAStick){
 				if(currentCalStep >= _noOfCalibrationPoints){//adjust notch angles
-					adjustNotch(currentCalStep, loopDelta, cmdButtons.Y, cmdButtons.X, cmdButtons.B, true, _measuredNotchAngles, _aNotchAngles, _aNotchStatus);
-					if(hardwareY || hardwareX || (_runButtons.B)){//only run this if the notch was adjusted
+					adjustNotch(currentCalStep, loopDelta, cmdButtons.Y, cmdButtons.X, cmdButtons.B, true, _measuredNotchAngles, _aNotchAngles, _aNotchStatus,displayButtons,selectButtons);
+					if(cmdButtons.Y || cmdButtons.X || (cmdButtons.B)){//only run this if the notch was adjusted
 						//clean full cal points again, feeding updated angles in
 						cleanCalPoints(_tempCalPointsX, _tempCalPointsY, _aNotchAngles, _cleanedPointsX, _cleanedPointsY, _notchPointsX, _notchPointsY, _aNotchStatus);
 						//linearize again
@@ -1011,13 +892,13 @@ void handleCommands(Buttons &displayButtons,Buttons &selectButtons){
 						notchCalibrate(_cleanedPointsX, _cleanedPointsY, _notchPointsX, _notchPointsY, _noOfNotches, _aAffineCoeffs, _aBoundaryAngles);
 					}
 				}else{//just show desired stick position
-					displayNotch(currentCalStep, true, _notchAngleDefaults);
+					displayNotch(currentCalStep, true, _notchAngleDefaults,displayButtons,selectButtons);
 				}
 			}
 			else{
 				if(currentCalStep >= _noOfCalibrationPoints){//adjust notch angles
-					adjustNotch(currentCalStep, loopDelta, cmdButtons.Y, cmdButtons.X, cmdButtons.B, false, _measuredNotchAngles, _cNotchAngles, _cNotchStatus);
-					if(hardwareY || hardwareX || (_runButtons.B)){//only run this if the notch was adjusted
+					adjustNotch(currentCalStep, loopDelta, cmdButtons.Y, cmdButtons.X, cmdButtons.B, false, _measuredNotchAngles, _cNotchAngles, _cNotchStatus,displayButtons,selectButtons);
+					if(cmdButtons.Y || cmdButtons.X || (cmdButtons.B)){//only run this if the notch was adjusted
 						//clean full cal points again, feeding updated angles in
 						cleanCalPoints(_tempCalPointsX, _tempCalPointsY, _cNotchAngles, _cleanedPointsX, _cleanedPointsY, _notchPointsX, _notchPointsY, _cNotchStatus);
 						//linearize again
@@ -1026,7 +907,7 @@ void handleCommands(Buttons &displayButtons,Buttons &selectButtons){
 						notchCalibrate(_cleanedPointsX, _cleanedPointsY, _notchPointsX, _notchPointsY, _noOfNotches, _cAffineCoeffs, _cBoundaryAngles);
 					}
 				}else{//just show desired stick position
-					displayNotch(currentCalStep, false, _notchAngleDefaults);
+					displayNotch(currentCalStep, false, _notchAngleDefaults,displayButtons,selectButtons);
 				}
 			}
 			break;
@@ -1035,11 +916,206 @@ void handleCommands(Buttons &displayButtons,Buttons &selectButtons){
 		controllerMode = safeMode;
 	}
 }
+/*
+ * Read the controllers analog inputs and filter/modify them according to the 
+ * current settings
+ */
+void readAnalog(Buttons &outButtons){
+	static float aStickX;
+	static float aStickY;
+	static float cStickX;
+	static float cStickY;
+	static float lastMicros = millis();
+
+#ifdef USEADCSCALE
+    _ADCScale = _ADCScale*0.999 + _ADCScaleFactor/adc->adc1->analogRead(ADC_INTERNAL_SOURCE::VREF_OUT);
+#endif
+    // otherwise _ADCScale is 1
+
+	//read the L and R sliders
+		switch(_lConfig) {
+			case 0: //Default Trigger state
+				outButtons.La = adc->adc0->analogRead(_pinLa)>>4;
+				break;
+			case 1: //Digital Only Trigger state
+				outButtons.La = (uint8_t) 0;
+				break;
+			case 2: //Analog Only Trigger state
+				outButtons.La = adc->adc0->analogRead(_pinLa)>>4;
+				break;
+			case 3: //Trigger Plug Emulation state
+				outButtons.La = adc->adc0->analogRead(_pinLa)>>4;
+				if (outButtons.La > (((uint8_t) (_LTriggerOffset)) + _startUpLa)) {
+					outButtons.La = (((uint8_t) (_LTriggerOffset)) + _startUpLa);
+				}
+				break;
+			case 4: //Digital => Analog Value state
+				if(digitalRead(_pinL)) {
+					outButtons.La = min(((uint8_t) (_LTriggerOffset)) + _startUpLa, 255);
+				} else {
+					outButtons.La = (uint8_t) 0;
+				}
+				break;
+			case 5: //Digital => Analog Value + Digital state
+				if(digitalRead(_pinL)) {
+					outButtons.La = min(((uint8_t) (_LTriggerOffset)) + _startUpLa, 255);
+				} else {
+					outButtons.La = (uint8_t) 0;
+				}
+				break;
+			default:
+				outButtons.La = adc->adc0->analogRead(_pinLa)>>4;
+		}
+
+		switch(_rConfig) {
+			case 0: //Default Trigger state
+				outButtons.Ra = adc->adc0->analogRead(_pinRa)>>4;
+				break;
+			case 1: //Digital Only Trigger state
+				outButtons.Ra = (uint8_t) 0;
+				break;
+			case 2: //Analog Only Trigger state
+				outButtons.Ra = adc->adc0->analogRead(_pinRa)>>4;
+				break;
+			case 3: //Trigger Plug Emulation state
+				outButtons.Ra = adc->adc0->analogRead(_pinRa)>>4;
+				if (outButtons.Ra > (((uint8_t) (_RTriggerOffset)) + _startUpRa)) {
+					outButtons.Ra = (((uint8_t) (_RTriggerOffset)) + _startUpRa);
+				}
+				break;
+			case 4: //Digital => Analog Value state
+				if(digitalRead(_pinR)) {
+					outButtons.Ra = min(((uint8_t) (_RTriggerOffset)) + _startUpRa, 255);
+				} else {
+					outButtons.Ra = (uint8_t) 0;
+				}
+				break;
+			case 5: //Digital => Analog Value + Digital state
+				if(digitalRead(_pinR)) {
+					outButtons.Ra = min(((uint8_t) (_RTriggerOffset)) + _startUpRa, 255);
+				} else {
+					outButtons.Ra = (uint8_t) 0;
+				}
+				break;
+			default:
+				outButtons.Ra = adc->adc0->analogRead(_pinRa)>>4;
+		}
+
+	unsigned int adcCount = 0;
+	unsigned int aXSum = 0;
+	unsigned int aYSum = 0;
+	unsigned int cXSum = 0;
+	unsigned int cYSum = 0;
+
+	do{
+		adcCount++;
+		aXSum += adc->adc0->analogRead(_pinAx);
+		aYSum += adc->adc0->analogRead(_pinAy);
+		cXSum += adc->adc0->analogRead(_pinCx);
+		cYSum += adc->adc0->analogRead(_pinCy);
+	}
+	while((micros()-lastMicros) < 1000);
+
+	//Serial.println(adcCount);
+	aStickX = aXSum/(float)adcCount/4096.0*_ADCScale;
+	aStickY = aYSum/(float)adcCount/4096.0*_ADCScale;
+	cStickX = cXSum/(float)adcCount/4096.0*_ADCScale;
+	cStickY = cYSum/(float)adcCount/4096.0*_ADCScale;
+
+	lastMicros = micros();
+
+	//linearize the analog stick inputs by multiplying by the coefficients found during calibration (3rd order fit)
+	float xZ = linearize(aStickX,_aFitCoeffsX);
+	float yZ = linearize(aStickY,_aFitCoeffsY);
+	float posCx = linearize(cStickX,_cFitCoeffsX);
+	float posCy = linearize(cStickY,_cFitCoeffsY);
+
+	//Run the kalman filter to eliminate snapback
+	float posAx = 0;
+	float posAy = 0;
+
+	runKalman(xZ,yZ,posAx,posAy);
+	
+	//Run a simple low-pass filter
+	static float oldPosAx = 0;
+	static float oldPosAy = 0;
+	posAx = _g.xSmoothing*posAx + (1-_g.xSmoothing)*oldPosAx;
+	posAy = _g.ySmoothing*posAy + (1-_g.ySmoothing)*oldPosAy;
+	oldPosAx = posAx;
+	oldPosAy = posAy;
+
+	//Run a simple low-pass filter on the C-stick
+
+
+	static float oldCX = 0;
+	static float oldCY = 0;
+
+	float xWeight1 = _g.cXSmoothing;
+	float xWeight2 = 1-xWeight1;
+	float yWeight1 = _g.cYSmoothing;
+	float yWeight2 = 1-yWeight1;
+
+	posCx = xWeight1*posCx + xWeight2*oldCX;
+	posCy = yWeight1*posCy + yWeight2*oldCY;
+	
+	oldCX = posCx;
+	oldCY = posCy;
+
+	//Run a median filter to reduce noise
+#ifdef USEMEDIAN
+    runMedian(posAx, _xPosList, _xMedianIndex);
+    runMedian(posAy, _yPosList, _yMedianIndex);
+#endif
+
+	float remappedAx;
+	float remappedAy;
+	float remappedCx;
+	float remappedCy;
+	notchRemap(posAx, posAy, &remappedAx, &remappedAy, _aAffineCoeffs, _aBoundaryAngles,_noOfNotches);
+	notchRemap(posCx, posCy, &remappedCx, &remappedCy, _cAffineCoeffs, _cBoundaryAngles,_noOfNotches);
+
+	//Clamp values from -125 to +125
+	remappedAx = min(125, max(-125, remappedAx));
+	remappedAy = min(125, max(-125, remappedAy));
+	remappedCx = min(125, max(-125, remappedCx+_cXOffset));
+	remappedCy = min(125, max(-125, remappedCy+_cYOffset));
+
+	float hystVal = 0.3;
+	//assign the remapped values to the button struct
+
+	float diffAx = (remappedAx+127.5)-outButtons.Ax;
+	if( (diffAx > (1.0 + hystVal)) || (diffAx < -hystVal) ){
+		outButtons.Ax = (uint8_t) (remappedAx+127.5);
+	}
+	float diffAy = (remappedAy+127.5)-outButtons.Ay;
+	if( (diffAy > (1.0 + hystVal)) || (diffAy < -hystVal) ){
+		outButtons.Ay = (uint8_t) (remappedAy+127.5);
+	}
+
+
+	float diffCx = (remappedCx+127.5)-outButtons.Cx;
+	if( (diffCx > (1.0 + hystVal)) || (diffCx < -hystVal) ){
+		outButtons.Cx = (uint8_t) (remappedCx+127.5);
+	}
+	float diffCy = (remappedCy+127.5)-outButtons.Cy;
+	if( (diffCy > (1.0 + hystVal)) || (diffCy < -hystVal) ){
+		outButtons.Cy = (uint8_t) (remappedCy+127.5);
+	}
+}
+/*
+ * Joybus communication code for the teensy 4.0, interrupt based, runs whenever
+ * a new bit is detected on the data line
+ */
 #ifdef TEENSY4_0
 #ifndef HALFDUPLEX
 //commInt() will be called on every rising edge of a pulse that we receive
 //we will check if we have the expected amount of serial data yet, if we do we will do something with it, if we don't we will do nothing and wait for the next rising edge to check again
 void commInt() {
+	static bool _writing = false;
+	static bool _waiting = false;
+	static int _bitQueue = 8;
+	static int _errorCount = 0;
+	static int _reportCount = 0;
 	//check to see if we have the expected amount of data yet
 	if(Serial2.available() >= _bitQueue){
 		uint8_t cmdByte = 0;
@@ -1219,6 +1295,11 @@ void commInt() {
 //commInt() will be called on every rising edge of a pulse that we receive
 //we will check if we have the expected amount of serial data yet, if we do we will do something with it, if we don't we will do nothing and wait for the next rising edge to check again
 void commInt() {
+	static bool _waiting = false;
+	static int _bitQueue = 8;
+	static int _errorCount = 0;
+	static int _reportCount = 0;
+	
 	digitalWriteFast(_pinLED,LOW);
 	//check to see if we have the expected amount of data yet
 	if(Serial2.available() >= _bitQueue){
@@ -1397,6 +1478,210 @@ void resetSerial(){
 }
 #endif // HALFDUPLEX
 #endif // TEENSY4_0
+/*
+ * Joybus communication code for the teensy 3.2, interrupt and timer based
+ * bitcounter runs whenever a new bit is detected on the data line, and 
+ * communicate is called by timer to parse the data and respond
+ */
+ #ifdef TEENSY3_2
+/*******************
+	communicate
+	try to communicate with the gamecube/wii
+*******************/
+void bitCounter(){
+	//received a bit of data
+	_bitCount ++;
+	//digitalWriteFast(12,!(_bitCount%2));
+	
+	//if this was the first bit of a command we need to set the timer to call communicate() in ~40us when the first 8 bits of the command is received and set the status to reading
+	if(_bitCount == 1){
+		timer1.trigger((_cmdLengthShort-1)*10);
+		_commStatus = _commRead;
+	}
+}
+void communicate(){
+	//Serial.println(_commStatus,DEC);
+	
+	//check to see if we are reading a command
+	if(_commStatus == _commRead){
+		//wait until we have all 4 serial bytes (8 bits) ready to read
+		while(Serial2.available() < (_cmdLengthShort-1)){}
+		
+		//read the command in
+		int cmdByte = 0;
+		int cmd = 0;
+		bool bitOne = 0;
+		bool bitTwo = 0;
+		for(int i = 0; i < _cmdLengthShort-1; i++){
+			cmd = Serial2.read();
+			//the first bit is encoded in the second half of the serial byte, apply a mask to the 6th bit of the serial byte to get it
+			bitOne = cmd & 0b00000010;
+			//the second bit is encoded in the first half of the serial byte, apply a mask to the 2nd bit of the serial byte to get it
+			bitTwo = cmd & 0b01000000;
+			//put the two bits into the command byte
+			cmdByte = (cmdByte<<1)+bitOne;
+			cmdByte = (cmdByte<<1)+bitTwo;
+
+		}
+		//Serial.print("cmd: ");
+		//Serial.println(cmdByte,BIN);
+		//switch the serial hardware to the faster baud rate to be ready to respond
+		setSerialFast();
+
+		switch(cmdByte){
+			
+		//probe
+		case 0x00:
+			//set the timer to call communicate() again in ~96 us when the probe response is done being sent
+			timer1.trigger(_probeLength*8);
+			//write the probe response
+			for(int i = 0; i< _probeLength; i++){
+				Serial2.write(_probeResponse[i]);
+			}
+			//write a stop bit
+			Serial2.write(0xFF);
+			//set the write queue to the sum of the probe command BIT length and the probe response BIT length so we will be about to know when the correct number of bits has been sent
+			_writeQueue = _cmdLengthShort*2-1+(_probeLength)*2+1;
+			//set the status to writing
+			_commStatus = _commWrite;
+			Serial.println("probe");
+		break;
+		
+		//origin
+		case 0x41:
+			//set the timer to call communicate() again in ~320 us when the probe response is done being sent
+			timer1.trigger(_originLength*8);
+			//create the response to be sent
+			setCommResponse(_runButtons, _displayButtons,_selectButtons,_commResponse);
+			//write the origin response
+			for(int i = 0; i< _originLength; i++){
+				Serial2.write(_commResponse[i]);
+			}
+			//write a stop bit
+			Serial2.write(0xFF);
+			//set the write queue to the sum of the origin command BIT length and the origin response BIT length so we will be about to know when the correct number of bits has been sent
+			_writeQueue = _cmdLengthShort*2-1+(_originLength)*2+1;
+			//set the status to writing
+			_commStatus = _commWrite;
+			Serial.println("origin");
+		  break;
+			
+		//poll
+		case 0x40:
+			//set the timer to call communicate() again in ~56 us when the poll command is finished being read
+			timer1.trigger(56);
+			//set the status to receiving the poll command
+			_commStatus = _commPoll;
+			//create the poll response
+			setCommResponse(_runButtons, _displayButtons,_selectButtons,_commResponse);
+			break;
+		default:
+		  //got something strange, try waiting for a stop bit to syncronize
+			Serial.println("error");
+			Serial.println(_bitCount,DEC);
+
+			resetSerial();
+
+			uint8_t thisbyte = 0;
+			//wait until we get a stop bit
+		  while(thisbyte != 0xFF){
+				while(!Serial2.available());
+				thisbyte = Serial2.read();
+				//Serial.println(thisbyte,BIN);
+			}
+			//set the status to idle, reset the bit count and write queue so we are ready to receive the next command
+			_commStatus = _commIdle;
+			_bitCount = 0;
+			_writeQueue = 0;
+	  }
+	}
+	else if(_commStatus == _commPoll){
+		//we should now be finishing reading the poll command (which is longer than the others)
+		while(_bitCount<(_cmdLengthLong*2-1)){} //wait until we've received 25 bits, the length of the poll command
+		
+		//write the poll response (we do this before setting the timer  here to start responding as soon as possible)
+		for(int i = 0; i< _pollLength; i++){
+			Serial2.write(_commResponse[i]);
+		}
+		//write a stop bit
+		Serial2.write(0xFF);
+		
+		//set the timer so communicate() is called in ~135us when the poll response is done being written
+		timer1.trigger(135);
+		//set the write queue to the sum of the origin command BIT length and the origin response BIT length so we will be about to know when the correct number of bits has been sent
+		_writeQueue = _cmdLengthLong*2-1+(_pollLength)*2+1;
+		//set the status to writing
+		_commStatus = _commWrite;
+	}
+	else if(_commStatus == _commWrite){
+		//wait until we've written all the bits we intend to
+ 		while(_writeQueue > _bitCount){}
+		
+		//reset the serial to the slow baudrate
+		resetSerial();
+		//set the status to idle, reset the bit count and write queue so we are ready to receive the next command
+		_bitCount = 0;
+		_commStatus = _commIdle;
+		_writeQueue = 0;
+	}
+	else{
+		Serial.println("communication status error");
+	}
+}
+void setSerialFast(){
+	UART1_BDH = _fastBDH;
+	UART1_BDL = _fastBDL;
+	UART1_C4 = _fastC4;
+	UART1_C2 &= ~UART_C2_RE;
+}
+void resetSerial(){
+	UART1_BDH = _slowBDH;
+	UART1_BDL = _slowBDL;
+	UART1_C4 = _slowC4;
+	UART1_C2 |= UART_C2_RE;
+	Serial2.clear();
+}
+#endif // TEENSY3_2
+/*******************
+	setCommResponse
+	takes the values that have been put into the button struct and translates them in the serial commands ready
+	to be sent to the gamecube/wii
+*******************/
+void setCommResponse(Buttons runInputs, Buttons displayInputs, Buttons inputSelect, char commResponse[]){
+	Buttons outputs;
+	readButtons(runInputs);
+	
+	for(int i = 0; i < 8; i++){
+		outputs.arr[i] = (runInputs.arr[i] & ~inputSelect.arr[i]) | (displayInputs.arr[i] & inputSelect.arr[i]);
+		//write all of the data in the button struct (taken from the dogebawx project, thanks to GoodDoge)
+#ifdef TEENSY3_2
+		for(int j = 0; j < 4; j++){
+			//this could probably be done better but we need to take 2 bits at a time to put into one serial byte
+			//for details on this read here: http://www.qwertymodo.com/hardware-projects/n64/n64-controller
+			int these2bits = (outputs.arr[i]>>(6-j*2)) & 3;
+			switch(these2bits){
+				case 0:
+				_commResponse[(i<<2)+j] = 0x08;
+				break;
+				case 1:
+				_commResponse[(i<<2)+j] = 0xE8;
+				break;
+				case 2:
+				_commResponse[(i<<2)+j] = 0x0F;
+				break;
+				case 3:
+				_commResponse[(i<<2)+j] = 0xEF;
+				break;
+			}
+		}
+#endif // TEENSY3_2
+#ifdef TEENSY4_0
+		for(int j = 0; j < 8; j++){
+			_commResponse[i*8+j] = outputs.arr[i]>>(7-j) & 1;
+		}
+#endif // TEENSY4_0
+	}
+}
 void readEEPROM(){
 	//get the jump setting
 	EEPROM.get(_eepromJump, _jumpConfig);
@@ -1710,14 +1995,6 @@ void setPinModes(){
 	pinMode(_pinBrake, OUTPUT);
 #endif
 
-	bounceDr.attach(_pinDr);
-	bounceDr.interval(1000);
-	bounceDu.attach(_pinDu);
-	bounceDu.interval(1000);
-	bounceDl.attach(_pinDl);
-	bounceDl.interval(1000);
-	bounceDd.attach(_pinDd);
-	bounceDd.interval(1000);
 }
 void readButtons(Buttons &btn){
 	btn.A = !digitalRead(_pinA);
@@ -1778,7 +2055,7 @@ void readButtons(Buttons &btn){
 	}
 }
 void readTrueButtons(Buttons &btn){
-    btn.A = !digitalRead(_pinA);
+  btn.A = !digitalRead(_pinA);
 	btn.B = !digitalRead(_pinB);
 	btn.X = !digitalRead(_pinX);
 	btn.Y = !digitalRead(_pinY);
@@ -1788,10 +2065,10 @@ void readTrueButtons(Buttons &btn){
 	btn.Dd = !digitalRead(_pinDd);
 	btn.Dl = !digitalRead(_pinDl);
 	btn.Dr = !digitalRead(_pinDr);
-    btn.L = !digitalRead(_pinL);
-    btn.R = !digitalRead(_pinR);
+  btn.L = !digitalRead(_pinL);
+  btn.R = !digitalRead(_pinR);
 }
-unsigned int acknowledgeCmd(int lockTimeMs, Buttons &displayButtons,Buttons &selectButtons){
+void acknowledgeCmd(int lockTimeMs, Buttons &displayButtons,Buttons &selectButtons){
   setButtons(displayButtons,false);
   setButtons(selectButtons,true);
   displayButtons.Cx = (uint8_t) (255);
@@ -1800,7 +2077,8 @@ unsigned int acknowledgeCmd(int lockTimeMs, Buttons &displayButtons,Buttons &sel
 	displayButtons.Ay = (uint8_t) (255);
 	displayButtons.La = (uint8_t) (255);
 	displayButtons.Ra = (uint8_t) (255);
-	return millis() + lockTimeMs;
+	
+	delay(lockTimeMs);
 }
 void setButtons(Buttons &thisButtons, bool allHigh){
 	uint8_t fillValue;
@@ -1819,7 +2097,9 @@ void setButtons(Buttons &thisButtons, bool allHigh){
 	thisButtons.errS = 0;
 	thisButtons.high = 1;
 }
-void changeRumble(const bool increase) {
+void adjustRumble(const bool increase,Buttons &displayButtons,Buttons &selectButtons) {
+	showOnlyAnalog(0,0,0,0,0,_startUpLa,_startUpRa,displayButtons,selectButtons);
+	
 	Serial.println("changing rumble");
 	if(increase) {
 		_rumble += 1;
@@ -1834,34 +2114,33 @@ void changeRumble(const bool increase) {
 	}
 
 	_rumblePower = calcRumblePower(_rumble);
+	
 	EEPROM.put(_eepromRumble, _rumble);
+	
+	delay(_originLockTime);
+	showOnlyAnalog(_defaultLockTime,0,0,0,_rumble,_startUpLa,_startUpRa,displayButtons,selectButtons);
 }
-unsigned int showRumble(int lockTimeMs, Buttons &displayButtons,Buttons &selectButtons) {
-	setButtons(displayButtons,false);
-  setButtons(selectButtons,true);
-	displayButtons.Cx = (uint8_t) 127;
-	displayButtons.Cy = (uint8_t) (_rumble + 127.5);
-	return millis() + lockTimeMs;
-}
-void adjustSnapback(bool change, bool _xAxis, bool _increase){
+void adjustSnapback(bool _xAxis, bool increase,Buttons &displayButtons,Buttons &selectButtons){
+	showOnlyAnalog(0,0,0,0,0,_startUpLa,_startUpRa,displayButtons,selectButtons);
+	
 	Serial.println("adjusting snapback filtering");
-	if(_xAxis && _increase && change){
+	if(_xAxis && increase){
 		_xSnapback = min(_xSnapback+1, _snapbackMax);
 		Serial.print("x snapback filtering increased to:");
 		Serial.println(_xSnapback);
 	}
-	else if(_xAxis && !_increase && change){
+	else if(_xAxis && !increase){
 		_xSnapback = max(_xSnapback-1, _snapbackMin);
 		Serial.print("x snapback filtering decreased to:");
 		Serial.println(_xSnapback);
 	}
 
-	if(!_xAxis && _increase && change){
+	if(!_xAxis && increase){
 		_ySnapback = min(_ySnapback+1, _snapbackMax);
 		Serial.print("y snapback filtering increased to:");
 		Serial.println(_ySnapback);
 	}
-	else if(!_xAxis && !_increase && change){
+	else if(!_xAxis && !increase){
 		_ySnapback = max(_ySnapback-1, _snapbackMin);
 		Serial.print("y snapback filtering decreased to:");
 		Serial.println(_ySnapback);
@@ -1871,14 +2150,19 @@ void adjustSnapback(bool change, bool _xAxis, bool _increase){
 	_gains.yVelDamp = velDampFromSnapback(_ySnapback);
 
    //recompute the intermediate gains used directly by the kalman filter
-   recomputeGains();
-
+  recomputeGains();
+	
+	
 	EEPROM.put(_eepromxSnapback,_xSnapback);
 	EEPROM.put(_eepromySnapback,_ySnapback);
+	
+	delay(_originLockTime);
+	showOnlyAnalog(_defaultLockTime,0,0,_xSnapback,_ySnapback,_startUpLa,_startUpRa,displayButtons,selectButtons);
 }
-void adjustSmoothingA(bool change, bool _xAxis, bool _increase) {
+void adjustSmoothingA( bool _xAxis, bool increase, Buttons &displayButtons,Buttons &selectButtons) {
+	showOnlyAnalog(0,0,0,0,0,_startUpLa,_startUpRa,displayButtons,selectButtons);
 	Serial.println("Adjusting Smoothing");
-	if (_xAxis && _increase && change) {
+	if (_xAxis && increase) {
 		_gains.xSmoothing = _gains.xSmoothing + 0.1;
 		if(_gains.xSmoothing > _smoothingMax) {
 			_gains.xSmoothing = _smoothingMax;
@@ -1886,7 +2170,7 @@ void adjustSmoothingA(bool change, bool _xAxis, bool _increase) {
 		EEPROM.put(_eepromxSmoothing, _gains.xSmoothing);
 		Serial.print("X Smoothing increased to:");
 		Serial.println(_gains.xSmoothing);
-	} else if(_xAxis && !_increase && change) {
+	} else if(_xAxis && !increase) {
 		_gains.xSmoothing = _gains.xSmoothing - 0.1;
 		if(_gains.xSmoothing < _smoothingMin) {
 			_gains.xSmoothing = _smoothingMin;
@@ -1894,7 +2178,7 @@ void adjustSmoothingA(bool change, bool _xAxis, bool _increase) {
 		EEPROM.put(_eepromxSmoothing, _gains.xSmoothing);
 		Serial.print("X Smoothing decreased to:");
 		Serial.println(_gains.xSmoothing);
-	} else if(!_xAxis && _increase && change) {
+	} else if(!_xAxis && increase) {
 		_gains.ySmoothing = _gains.ySmoothing + 0.1;
 		if (_gains.ySmoothing > _smoothingMax) {
 			_gains.ySmoothing = _smoothingMax;
@@ -1902,7 +2186,7 @@ void adjustSmoothingA(bool change, bool _xAxis, bool _increase) {
 		EEPROM.put(_eepromySmoothing, _gains.ySmoothing);
 		Serial.print("Y Smoothing increased to:");
 		Serial.println(_gains.ySmoothing);
-	} else if(!_xAxis && !_increase && change) {
+	} else if(!_xAxis && !increase) {
 		_gains.ySmoothing = _gains.ySmoothing - 0.1;
 		if (_gains.ySmoothing < _smoothingMin) {
 			_gains.ySmoothing = _smoothingMin;
@@ -1914,10 +2198,15 @@ void adjustSmoothingA(bool change, bool _xAxis, bool _increase) {
 
 	//recompute the intermediate gains used directly by the kalman filter
 	recomputeGains();
+	
+	delay(_originLockTime);
+	showOnlyAnalog(_defaultLockTime,0,0,_gains.xSmoothing,_gains.ySmoothing,_startUpLa,_startUpRa,displayButtons,selectButtons);
 }
-void adjustSmoothingC(bool change, bool _xAxis, bool _increase) {
+void adjustSmoothingC(bool _xAxis, bool increase, Buttons &displayButtons,Buttons &selectButtons) {
+	showOnlyAnalog(0,0,0,0,0,_startUpLa,_startUpRa,displayButtons,selectButtons);
+	
 	Serial.println("Adjusting C-Stick Smoothing");
-	if (_xAxis && _increase && change) {
+	if (_xAxis && increase) {
 		_gains.cXSmoothing = _gains.cXSmoothing + 0.1;
 		if(_gains.cXSmoothing > _smoothingMax) {
 			_gains.cXSmoothing = _smoothingMax;
@@ -1925,7 +2214,8 @@ void adjustSmoothingC(bool change, bool _xAxis, bool _increase) {
 		EEPROM.put(_eepromCxSmoothing, _gains.cXSmoothing);
 		Serial.print("C-Stick X Smoothing increased to:");
 		Serial.println(_gains.cXSmoothing);
-	} else if(_xAxis && !_increase && change) {
+	}
+	else if(_xAxis && !increase) {
 		_gains.cXSmoothing = _gains.cXSmoothing - 0.1;
 		if(_gains.cXSmoothing < _smoothingMin) {
 			_gains.cXSmoothing = _smoothingMin;
@@ -1933,7 +2223,8 @@ void adjustSmoothingC(bool change, bool _xAxis, bool _increase) {
 		EEPROM.put(_eepromCxSmoothing, _gains.cXSmoothing);
 		Serial.print("C-Stick X Smoothing decreased to:");
 		Serial.println(_gains.cXSmoothing);
-	} else if(!_xAxis && _increase && change) {
+	}
+	else if(!_xAxis && increase) {
 		_gains.cYSmoothing = _gains.cYSmoothing + 0.1;
 		if (_gains.cYSmoothing > _smoothingMax) {
 			_gains.cYSmoothing = _smoothingMax;
@@ -1941,7 +2232,8 @@ void adjustSmoothingC(bool change, bool _xAxis, bool _increase) {
 		EEPROM.put(_eepromCySmoothing, _gains.cYSmoothing);
 		Serial.print("C-Stick Y Smoothing increased to:");
 		Serial.println(_gains.cYSmoothing);
-	} else if(!_xAxis && !_increase && change) {
+	}
+	else if(!_xAxis && !increase) {
 		_gains.cYSmoothing = _gains.cYSmoothing - 0.1;
 		if (_gains.cYSmoothing < _smoothingMin) {
 			_gains.cYSmoothing = _smoothingMin;
@@ -1953,11 +2245,15 @@ void adjustSmoothingC(bool change, bool _xAxis, bool _increase) {
 
 	//recompute the intermediate gains used directly by the kalman filter
 	recomputeGains();
-
+	
+	delay(_originLockTime);
+	showOnlyAnalog(_defaultLockTime,0,0,_gains.cXSmoothing,_gains.cYSmoothing,_startUpLa,_startUpRa,displayButtons,selectButtons);
 }
-void adjustCstickOffset(bool change, bool _xAxis, bool _increase) {
+void adjustCstickOffset(bool _xAxis, bool increase, Buttons &displayButtons,Buttons &selectButtons) {
+	showOnlyAnalog(0,0,0,0,0,_startUpLa,_startUpRa,displayButtons,selectButtons);
+	
 	Serial.println("Adjusting C-stick Offset");
-	if(_xAxis && _increase && change) {
+	if(_xAxis && increase) {
 		_cXOffset++;
 		if(_cXOffset > _cMax) {
 			_cXOffset = _cMax;
@@ -1965,7 +2261,7 @@ void adjustCstickOffset(bool change, bool _xAxis, bool _increase) {
 		EEPROM.put(_eepromcXOffset, _cXOffset);
 		Serial.print("X offset increased to:");
 		Serial.println(_cXOffset);
-	} else if(_xAxis && !_increase && change) {
+	} else if(_xAxis && !increase) {
 		_cXOffset--;
 		if(_cXOffset < _cMin) {
 			_cXOffset = _cMin;
@@ -1973,7 +2269,7 @@ void adjustCstickOffset(bool change, bool _xAxis, bool _increase) {
 		EEPROM.put(_eepromcXOffset, _cXOffset);
 		Serial.print("X offset decreased to:");
 		Serial.println(_cXOffset);
-	} else if(!_xAxis && _increase && change) {
+	} else if(!_xAxis && increase) {
 		_cYOffset++;
 		if(_cYOffset > _cMax) {
 			_cYOffset = _cMax;
@@ -1981,7 +2277,7 @@ void adjustCstickOffset(bool change, bool _xAxis, bool _increase) {
 		EEPROM.put(_eepromcYOffset, _cYOffset);
 		Serial.print("Y offset increased to:");
 		Serial.println(_cYOffset);
-	} else if(!_xAxis && !_increase && change) {
+	} else if(!_xAxis && !increase) {
 		_cYOffset--;
 		if(_cYOffset < _cMin) {
 			_cYOffset = _cMin;
@@ -1990,44 +2286,29 @@ void adjustCstickOffset(bool change, bool _xAxis, bool _increase) {
 		Serial.print("Y offset decreased to:");
 		Serial.println(_cYOffset);
 	}
-}
-unsigned int showOnCStick( int lockTimeMs, float xVal, float yVal, Buttons &displayButtons,Buttons &selectButtons){
-	setButtons(displayButtons,false);
-  setButtons(selectButtons,true);
-
-	displayButtons.Cx = (uint8_t) (127.5 + xVal);
-	displayButtons.Cy = (uint8_t) (127.5 + yVal);
 	
-	return millis() + lockTimeMs;
+	delay(_originLockTime);
+	showOnlyAnalog(_defaultLockTime,0,0,_gains.cXSmoothing,_gains.cYSmoothing,_startUpLa,_startUpRa,displayButtons,selectButtons);
 }
-unsigned int showOnBothSticks( int lockTimeMs, float xValA, float yValA,float xValC, float yValC, Buttons &displayButtons,Buttons &selectButtons){
-	setButtons(displayButtons,false);
-  setButtons(selectButtons,true);
+void adjustTriggerOffset(bool _lTrigger, bool increase, Buttons &displayButtons,Buttons &selectButtons) {
+	showOnlyAnalog(0,0,0,0,0,_startUpLa,_startUpRa,displayButtons,selectButtons);
 	
-	displayButtons.Ax = (uint8_t) (127.5 + xValA);
-	displayButtons.Ay = (uint8_t) (127.5 + yValA);
-	displayButtons.Cx = (uint8_t) (127.5 + xValC);
-	displayButtons.Cy = (uint8_t) (127.5 + yValC);
-	
-	return millis() + lockTimeMs;
-}
-void adjustTriggerOffset(bool change, bool _lTrigger, bool _increase) {
-	if(_lTrigger && _increase && change) {
+	if(_lTrigger && increase) {
 		_LTriggerOffset++;
 		if(_LTriggerOffset > _triggerMax) {
 			_LTriggerOffset = _triggerMax;
 		}
-	} else if(_lTrigger && !_increase && change) {
+	} else if(_lTrigger && !increase) {
 		_LTriggerOffset--;
 		if(_LTriggerOffset < _triggerMin) {
 			_LTriggerOffset = _triggerMin;
 		}
-	} else if(!_lTrigger && _increase && change) {
+	} else if(!_lTrigger && increase) {
 		_RTriggerOffset++;
 		if(_RTriggerOffset > _triggerMax) {
 			_RTriggerOffset = _triggerMax;
 		}
-	} else if(!_lTrigger && !_increase && change) {
+	} else if(!_lTrigger && !increase) {
 		_RTriggerOffset--;
 		if(_RTriggerOffset < _triggerMin) {
 			_RTriggerOffset = _triggerMin;
@@ -2036,27 +2317,29 @@ void adjustTriggerOffset(bool change, bool _lTrigger, bool _increase) {
 
 	EEPROM.put(_eepromLOffset, _LTriggerOffset);
 	EEPROM.put(_eepromROffset, _RTriggerOffset);
-}
-unsigned int showTriggerOffset(int lockTimeMs, int leftOffset, int rightOffset, Buttons &displayButtons,Buttons &selectButtons){
-	setButtons(displayButtons,false);
-  setButtons(selectButtons,true);
 	
-	if(leftOffset > 99) {
-		displayButtons.Ax = (uint8_t) (127.5 + 100);
-		displayButtons.Cx = (uint8_t) (127.5 + leftOffset-100);
+	float Ax,Ay,Cx,Cy;
+	if(_LTriggerOffset > 99) {
+		Ax = (uint8_t) (127.5 + 100);
+		Cx = (uint8_t) (127.5 + _LTriggerOffset-100);
 	} else {
-		displayButtons.Cx = (uint8_t) (127.5 + leftOffset);
+		Ax = (uint8_t) 127.5;
+		Cx = (uint8_t) (127.5 + _LTriggerOffset);
 	}
-	if(rightOffset > 99) {
-		displayButtons.Ay = (uint8_t) (127.5 + 100);
-		displayButtons.Cy = (uint8_t) (127.5 + rightOffset-100);
+	if(_RTriggerOffset > 99) {
+		Ay = (uint8_t) (127.5 + 100);
+		Cy = (uint8_t) (127.5 + _RTriggerOffset-100);
 	} else {
-		displayButtons.Cy = (uint8_t) (127.5 + rightOffset);
+		Ay = (uint8_t) 127.5;
+		Cy = (uint8_t) (127.5 + _RTriggerOffset);
 	}
 	
-	return millis() + lockTimeMs;
+	delay(_originLockTime);
+	showOnlyAnalog(_defaultLockTime,Ax,Ay,Cx,Cy,_startUpLa,_startUpRa,displayButtons,selectButtons);
 }
-void readJumpConfig(bool _swapXZ, bool _swapYZ){
+void adjustJumpConfig(bool _swapXZ, bool _swapYZ,Buttons &displayButtons,Buttons &selectButtons){
+	showOnlyAnalog(0,0,0,0,0,_startUpLa,_startUpRa,displayButtons,selectButtons);
+	
 	Serial.print("setting jump to: ");
 	if(_swapXZ){
 		_jumpConfig = 1;
@@ -2070,8 +2353,75 @@ void readJumpConfig(bool _swapXZ, bool _swapYZ){
 		Serial.println("normal");
 		_jumpConfig = 0;
 	}
-	EEPROM.put(_eepromJump,_jumpConfig);
 	setJump(_jumpConfig);
+	EEPROM.put(_eepromJump,_jumpConfig);
+	
+	delay(_originLockTime);
+	acknowledgeCmd(_defaultLockTime,displayButtons,selectButtons);
+}
+void nextTriggerState(int _currentConfig, bool _lTrigger,Buttons &displayButtons,Buttons &selectButtons) {
+	showOnlyAnalog(0,0,0,0,0,_startUpLa,_startUpRa,displayButtons,selectButtons);
+	
+	if(_lTrigger) {
+		if(_currentConfig >= 5) {
+			_lConfig = 0;
+		} else {
+			_lConfig = _currentConfig + 1;
+		}
+	} else {
+		if(_currentConfig >= 5) {
+			_rConfig = 0;
+		} else {
+			_rConfig = _currentConfig + 1;
+		}
+	}
+	EEPROM.put(_eepromLToggle, _lConfig);
+	EEPROM.put(_eepromRToggle, _rConfig);
+	
+	delay(_originLockTime);
+	showOnlyAnalog(_defaultLockTime,0,0,_lConfig,_rConfig,_startUpLa,_startUpRa,displayButtons,selectButtons);
+}
+void showOnCStick( int lockTimeMs, float xVal, float yVal, Buttons &displayButtons,Buttons &selectButtons){
+	setButtons(displayButtons,false);
+  setButtons(selectButtons,false);
+	
+	selectButtons.Cx  = 255;
+	selectButtons.Cy  = 255;
+	displayButtons.Cx = (uint8_t) (127.5 + xVal);
+	displayButtons.Cy = (uint8_t) (127.5 + yVal);
+	
+	delay(lockTimeMs);
+	/* int startTime = millis();
+	int ellapsedTime = 0;
+	while(ellapsedTime < lockTimeMs){
+		ellapsedTime = millis()-startTime;
+	} */
+}
+void showOnAStick( int lockTimeMs, float xValA, float yValA,float xValC, float yValC, Buttons &displayButtons,Buttons &selectButtons){
+	setButtons(displayButtons,false);
+  setButtons(selectButtons,false);
+	
+	selectButtons.Ax  = 255;
+	selectButtons.Ay  = 255;
+	displayButtons.Ax = (uint8_t) (127.5 + xValA);
+	displayButtons.Ay = (uint8_t) (127.5 + yValA);
+	
+	delay(lockTimeMs);
+}
+void showOnlyAnalog(int lockTimeMs, float xValA, float yValA,float xValC, float yValC, float L, float R, Buttons &displayButtons,Buttons &selectButtons){
+	setButtons(displayButtons,false);
+  setButtons(selectButtons,true);
+	
+	displayButtons.L = (uint8_t) (L);
+	displayButtons.R = (uint8_t) (R);
+	displayButtons.Ax = (uint8_t) (127.5 + xValA);
+	displayButtons.Ay = (uint8_t) (127.5 + yValA);
+	displayButtons.Cx = (uint8_t) (127.5 + xValC);
+	displayButtons.Cy = (uint8_t) (127.5 + yValC);
+	
+	if(lockTimeMs>0){
+		delay(lockTimeMs);
+	}
 }
 void setJump(int jumpConfig){
 	switch(jumpConfig){
@@ -2090,23 +2440,6 @@ void setJump(int jumpConfig){
 				_pinXSwappable = _pinX;
 				_pinYSwappable = _pinY;
 	}
-}
-void nextTriggerState(int _currentConfig, bool _lTrigger) {
-	if(_lTrigger) {
-		if(_currentConfig >= 5) {
-			_lConfig = 0;
-		} else {
-			_lConfig = _currentConfig + 1;
-		}
-	} else {
-		if(_currentConfig >= 5) {
-			_rConfig = 0;
-		} else {
-			_rConfig = _currentConfig + 1;
-		}
-	}
-	EEPROM.put(_eepromLToggle, _lConfig);
-	EEPROM.put(_eepromRToggle, _rConfig);
 }
 /*
  * Set the outputs for startup so sticks are centered and triggers are zero'd
@@ -2139,185 +2472,6 @@ void initializeButtons(Buttons &displayButtons, Buttons &selectButtons, int &sta
 	//set the trigger values to this measured startup value
 	displayButtons.La = startUpLa;
 	displayButtons.Ra = startUpRa;
-
-}
-void readSticks(int readA, int readC){
-#ifdef USEADCSCALE
-    _ADCScale = _ADCScale*0.999 + _ADCScaleFactor/adc->adc1->analogRead(ADC_INTERNAL_SOURCE::VREF_OUT);
-#endif
-    // otherwise _ADCScale is 1
-
-	//read the L and R sliders
-		switch(_lConfig) {
-			case 0: //Default Trigger state
-				_runButtons.La = adc->adc0->analogRead(_pinLa)>>4;
-				break;
-			case 1: //Digital Only Trigger state
-				_runButtons.La = (uint8_t) 0;
-				break;
-			case 2: //Analog Only Trigger state
-				_runButtons.La = adc->adc0->analogRead(_pinLa)>>4;
-				break;
-			case 3: //Trigger Plug Emulation state
-				_runButtons.La = adc->adc0->analogRead(_pinLa)>>4;
-				if (_runButtons.La > (((uint8_t) (_LTriggerOffset)) + _startUpLa)) {
-					_runButtons.La = (((uint8_t) (_LTriggerOffset)) + _startUpLa);
-				}
-				break;
-			case 4: //Digital => Analog Value state
-				if(hardwareL) {
-					_runButtons.La = min(((uint8_t) (_LTriggerOffset)) + _startUpLa, 255);
-				} else {
-					_runButtons.La = (uint8_t) 0;
-				}
-				break;
-			case 5: //Digital => Analog Value + Digital state
-				if(hardwareL) {
-					_runButtons.La = min(((uint8_t) (_LTriggerOffset)) + _startUpLa, 255);
-				} else {
-					_runButtons.La = (uint8_t) 0;
-				}
-				break;
-			default:
-				_runButtons.La = adc->adc0->analogRead(_pinLa)>>4;
-		}
-
-		switch(_rConfig) {
-			case 0: //Default Trigger state
-				_runButtons.Ra = adc->adc0->analogRead(_pinRa)>>4;
-				break;
-			case 1: //Digital Only Trigger state
-				_runButtons.Ra = (uint8_t) 0;
-				break;
-			case 2: //Analog Only Trigger state
-				_runButtons.Ra = adc->adc0->analogRead(_pinRa)>>4;
-				break;
-			case 3: //Trigger Plug Emulation state
-				_runButtons.Ra = adc->adc0->analogRead(_pinRa)>>4;
-				if (_runButtons.Ra > (((uint8_t) (_RTriggerOffset)) + _startUpRa)) {
-					_runButtons.Ra = (((uint8_t) (_RTriggerOffset)) + _startUpRa);
-				}
-				break;
-			case 4: //Digital => Analog Value state
-				if(hardwareR) {
-					_runButtons.Ra = min(((uint8_t) (_RTriggerOffset)) + _startUpRa, 255);
-				} else {
-					_runButtons.Ra = (uint8_t) 0;
-				}
-				break;
-			case 5: //Digital => Analog Value + Digital state
-				if(hardwareR) {
-					_runButtons.Ra = min(((uint8_t) (_RTriggerOffset)) + _startUpRa, 255);
-				} else {
-					_runButtons.Ra = (uint8_t) 0;
-				}
-				break;
-			default:
-				_runButtons.Ra = adc->adc0->analogRead(_pinRa)>>4;
-		}
-
-	unsigned int adcCount = 0;
-	unsigned int aXSum = 0;
-	unsigned int aYSum = 0;
-	unsigned int cXSum = 0;
-	unsigned int cYSum = 0;
-
-	do{
-		adcCount++;
-		aXSum += adc->adc0->analogRead(_pinAx);
-		aYSum += adc->adc0->analogRead(_pinAy);
-		cXSum += adc->adc0->analogRead(_pinCx);
-		cYSum += adc->adc0->analogRead(_pinCy);
-	}
-	while((micros()-_lastMicros) < 1000);
-
-	//Serial.println(adcCount);
-	_aStickX = aXSum/(float)adcCount/4096.0*_ADCScale;
-	_aStickY = aYSum/(float)adcCount/4096.0*_ADCScale;
-	_cStickX = cXSum/(float)adcCount/4096.0*_ADCScale;
-	_cStickY = cYSum/(float)adcCount/4096.0*_ADCScale;
-
-	_dT = (micros() - _lastMicros)/1000.0;
-	_lastMicros = micros();
-	//create the measurement value to be used in the kalman filter
-	float xZ;
-	float yZ;
-
-	//linearize the analog stick inputs by multiplying by the coefficients found during calibration (3rd order fit)
-	xZ = linearize(_aStickX,_aFitCoeffsX);
-	yZ = linearize(_aStickY,_aFitCoeffsY);
-
-	float posCx = linearize(_cStickX,_cFitCoeffsX);
-	float posCy = linearize(_cStickY,_cFitCoeffsY);
-
-
-	//Run the kalman filter to eliminate snapback
-	runKalman(xZ,yZ);
-	//Run a simple low-pass filter
-	static float _oldPosAx = 0;
-	static float _oldPosAy = 0;
-	float posAx = _g.xSmoothing*_xPosFilt + (1-_g.xSmoothing)*_oldPosAx;
-	float posAy = _g.ySmoothing*_yPosFilt + (1-_g.ySmoothing)*_oldPosAy;
-	_oldPosAx = posAx;
-	_oldPosAy = posAy;
-
-	//Run a simple low-pass filter on the C-stick
-	float oldCX = _cXPos;
-	float oldCY = _cYPos;
-	_cXPos = posCx;
-	_cYPos = posCy;
-	float xWeight1 = _g.cXSmoothing;
-	float xWeight2 = 1-xWeight1;
-	float yWeight1 = _g.cYSmoothing;
-	float yWeight2 = 1-yWeight1;
-
-	_cXPos = xWeight1*_cXPos + xWeight2*oldCX;
-	_cYPos = yWeight1*_cYPos + yWeight2*oldCY;
-
-	posCx = _cXPos;
-	posCy = _cYPos;
-
-	//Run a median filter to reduce noise
-#ifdef USEMEDIAN
-    runMedian(posAx, _xPosList, _xMedianIndex);
-    runMedian(posAy, _yPosList, _yMedianIndex);
-#endif
-
-	float remappedAx;
-	float remappedAy;
-	float remappedCx;
-	float remappedCy;
-	notchRemap(posAx, posAy, &remappedAx, &remappedAy, _aAffineCoeffs, _aBoundaryAngles,_noOfNotches);
-	notchRemap(posCx, posCy, &remappedCx, &remappedCy, _cAffineCoeffs, _cBoundaryAngles,_noOfNotches);
-
-	//Clamp values from -125 to +125
-	remappedAx = min(125, max(-125, remappedAx));
-	remappedAy = min(125, max(-125, remappedAy));
-	remappedCx = min(125, max(-125, remappedCx+_cXOffset));
-	remappedCy = min(125, max(-125, remappedCy+_cYOffset));
-
-	float hystVal = 0.3;
-	//assign the remapped values to the button struct
-	if(readA){
-		float diffAx = (remappedAx+127.5)-_runButtons.Ax;
-		if( (diffAx > (1.0 + hystVal)) || (diffAx < -hystVal) ){
-			_runButtons.Ax = (uint8_t) (remappedAx+127.5);
-		}
-		float diffAy = (remappedAy+127.5)-_runButtons.Ay;
-		if( (diffAy > (1.0 + hystVal)) || (diffAy < -hystVal) ){
-			_runButtons.Ay = (uint8_t) (remappedAy+127.5);
-		}
-	}
-	if(readC){
-		float diffCx = (remappedCx+127.5)-_runButtons.Cx;
-		if( (diffCx > (1.0 + hystVal)) || (diffCx < -hystVal) ){
-			_runButtons.Cx = (uint8_t) (remappedCx+127.5);
-		}
-		float diffCy = (remappedCy+127.5)-_runButtons.Cy;
-		if( (diffCy > (1.0 + hystVal)) || (diffCy < -hystVal) ){
-			_runButtons.Cy = (uint8_t) (remappedCy+127.5);
-		}
-	}
 
 }
 /*******************
@@ -2361,206 +2515,6 @@ void notchRemap(float xIn, float yIn, float* xOut, float* yOut, float affineCoef
 		*yOut = 0;
 	}
 }
-/*******************
-	setCommResponse
-	takes the values that have been put into the button struct and translates them in the serial commands ready
-	to be sent to the gamecube/wii
-*******************/
-void setCommResponse( Buttons runInputs, Buttons displayInputs, Buttons inputSelect, char commResponse[]){
-	Buttons outputs;
-	readButtons(runInputs);
-	
-	for(int i = 0; i < 8; i++){
-		outputs.arr[i] = (runInputs.arr[i] & ~inputSelect.arr[i]) | (displayInputs.arr[i] & inputSelect.arr[i]);
-		//write all of the data in the button struct (taken from the dogebawx project, thanks to GoodDoge)
-#ifdef TEENSY3_2
-		for(int j = 0; j < 4; j++){
-			//this could probably be done better but we need to take 2 bits at a time to put into one serial byte
-			//for details on this read here: http://www.qwertymodo.com/hardware-projects/n64/n64-controller
-			int these2bits = (outputs.arr[i]>>(6-j*2)) & 3;
-			switch(these2bits){
-				case 0:
-				_commResponse[(i<<2)+j] = 0x08;
-				break;
-				case 1:
-				_commResponse[(i<<2)+j] = 0xE8;
-				break;
-				case 2:
-				_commResponse[(i<<2)+j] = 0x0F;
-				break;
-				case 3:
-				_commResponse[(i<<2)+j] = 0xEF;
-				break;
-			}
-		}
-#endif // TEENSY3_2
-#ifdef TEENSY4_0
-		for(int j = 0; j < 8; j++){
-			_commResponse[i*8+j] = outputs.arr[i]>>(7-j) & 1;
-		}
-#endif // TEENSY4_0
-	}
-}
-
-#ifdef TEENSY3_2
-/*******************
-	communicate
-	try to communicate with the gamecube/wii
-*******************/
-void bitCounter(){
-	//received a bit of data
-	_bitCount ++;
-	//digitalWriteFast(12,!(_bitCount%2));
-	
-	//if this was the first bit of a command we need to set the timer to call communicate() in ~40us when the first 8 bits of the command is received and set the status to reading
-	if(_bitCount == 1){
-		timer1.trigger((_cmdLengthShort-1)*10);
-		_commStatus = _commRead;
-	}
-}
-void communicate(){
-	//Serial.println(_commStatus,DEC);
-	
-	//check to see if we are reading a command
-	if(_commStatus == _commRead){
-		//wait until we have all 4 serial bytes (8 bits) ready to read
-		while(Serial2.available() < (_cmdLengthShort-1)){}
-		
-		//read the command in
-		int cmdByte = 0;
-		int cmd = 0;
-		bool bitOne = 0;
-		bool bitTwo = 0;
-		for(int i = 0; i < _cmdLengthShort-1; i++){
-			cmd = Serial2.read();
-			//the first bit is encoded in the second half of the serial byte, apply a mask to the 6th bit of the serial byte to get it
-			bitOne = cmd & 0b00000010;
-			//the second bit is encoded in the first half of the serial byte, apply a mask to the 2nd bit of the serial byte to get it
-			bitTwo = cmd & 0b01000000;
-			//put the two bits into the command byte
-			cmdByte = (cmdByte<<1)+bitOne;
-			cmdByte = (cmdByte<<1)+bitTwo;
-
-		}
-		//Serial.print("cmd: ");
-		//Serial.println(cmdByte,BIN);
-		//switch the serial hardware to the faster baud rate to be ready to respond
-		setSerialFast();
-
-		switch(cmdByte){
-			
-		//probe
-		case 0x00:
-			//set the timer to call communicate() again in ~96 us when the probe response is done being sent
-			timer1.trigger(_probeLength*8);
-			//write the probe response
-			for(int i = 0; i< _probeLength; i++){
-				Serial2.write(_probeResponse[i]);
-			}
-			//write a stop bit
-			Serial2.write(0xFF);
-			//set the write queue to the sum of the probe command BIT length and the probe response BIT length so we will be about to know when the correct number of bits has been sent
-			_writeQueue = _cmdLengthShort*2-1+(_probeLength)*2+1;
-			//set the status to writing
-			_commStatus = _commWrite;
-			Serial.println("probe");
-		break;
-		
-		//origin
-		case 0x41:
-			//set the timer to call communicate() again in ~320 us when the probe response is done being sent
-			timer1.trigger(_originLength*8);
-			//create the response to be sent
-			setCommResponse(_runButtons, _displayButtons,_selectButtons,_commResponse);
-			//write the origin response
-			for(int i = 0; i< _originLength; i++){
-				Serial2.write(_commResponse[i]);
-			}
-			//write a stop bit
-			Serial2.write(0xFF);
-			//set the write queue to the sum of the origin command BIT length and the origin response BIT length so we will be about to know when the correct number of bits has been sent
-			_writeQueue = _cmdLengthShort*2-1+(_originLength)*2+1;
-			//set the status to writing
-			_commStatus = _commWrite;
-			Serial.println("origin");
-		  break;
-			
-		//poll
-		case 0x40:
-			//set the timer to call communicate() again in ~56 us when the poll command is finished being read
-			timer1.trigger(56);
-			//set the status to receiving the poll command
-			_commStatus = _commPoll;
-			//create the poll response
-			setCommResponse(_runButtons, _displayButtons,_selectButtons,_commResponse);
-			break;
-		default:
-		  //got something strange, try waiting for a stop bit to syncronize
-			Serial.println("error");
-			Serial.println(_bitCount,DEC);
-
-			resetSerial();
-
-			uint8_t thisbyte = 0;
-			//wait until we get a stop bit
-		  while(thisbyte != 0xFF){
-				while(!Serial2.available());
-				thisbyte = Serial2.read();
-				//Serial.println(thisbyte,BIN);
-			}
-			//set the status to idle, reset the bit count and write queue so we are ready to receive the next command
-			_commStatus = _commIdle;
-			_bitCount = 0;
-			_writeQueue = 0;
-	  }
-	}
-	else if(_commStatus == _commPoll){
-		//we should now be finishing reading the poll command (which is longer than the others)
-		while(_bitCount<(_cmdLengthLong*2-1)){} //wait until we've received 25 bits, the length of the poll command
-		
-		//write the poll response (we do this before setting the timer  here to start responding as soon as possible)
-		for(int i = 0; i< _pollLength; i++){
-			Serial2.write(_commResponse[i]);
-		}
-		//write a stop bit
-		Serial2.write(0xFF);
-		
-		//set the timer so communicate() is called in ~135us when the poll response is done being written
-		timer1.trigger(135);
-		//set the write queue to the sum of the origin command BIT length and the origin response BIT length so we will be about to know when the correct number of bits has been sent
-		_writeQueue = _cmdLengthLong*2-1+(_pollLength)*2+1;
-		//set the status to writing
-		_commStatus = _commWrite;
-	}
-	else if(_commStatus == _commWrite){
-		//wait until we've written all the bits we intend to
- 		while(_writeQueue > _bitCount){}
-		
-		//reset the serial to the slow baudrate
-		resetSerial();
-		//set the status to idle, reset the bit count and write queue so we are ready to receive the next command
-		_bitCount = 0;
-		_commStatus = _commIdle;
-		_writeQueue = 0;
-	}
-	else{
-		Serial.println("communication status error");
-	}
-}
-void setSerialFast(){
-	UART1_BDH = _fastBDH;
-	UART1_BDL = _fastBDL;
-	UART1_C4 = _fastC4;
-	UART1_C2 &= ~UART_C2_RE;
-}
-void resetSerial(){
-	UART1_BDH = _slowBDH;
-	UART1_BDL = _slowBDL;
-	UART1_C4 = _slowC4;
-	UART1_C2 |= UART_C2_RE;
-	Serial2.clear();
-}
-#endif // TEENSY3_2
 /*******************
 	cleanCalPoints
 	take the x and y coordinates and notch angles collected during the calibration procedure,
@@ -2708,21 +2662,28 @@ void cleanCalPoints(const float calPointsX[], const float calPointsY[], const fl
 //The notch adjustment is limited in order to control
 //1. displacement of points (max 12 units out of +/- 100, for now)
 //2. stretching of coordinates (max +/- 30%)
-void adjustNotch(int currentStepIn, float loopDelta, bool CW, bool CCW, bool reset, bool calibratingAStick, float measuredNotchAngles[], float notchAngles[], int notchStatus[]){
+void adjustNotch(int currentStepIn, float loopDelta, bool CW, bool CCW, bool reset, bool calibratingAStick, float measuredNotchAngles[], float notchAngles[], int notchStatus[], Buttons &displayButtons,Buttons &selectButtons){
 	//This gets run after all the calibration points are collected
 	//So we subtract the number of calibration points and switch over to notch adjust order
 	const int notchIndex = _notchAdjOrder[currentStepIn-_noOfCalibrationPoints];
-
+	
+	setButtons(selectButtons,false);
+	setButtons(displayButtons,false);
+	
 	//display the desired value on the other stick
 	float x = 0;
 	float y = 0;
 	calcStickValues(measuredNotchAngles[notchIndex], &x, &y);
 	if(calibratingAStick){
-		_runButtons.Cx = (uint8_t) (x + 127.5);
-		_runButtons.Cy = (uint8_t) (y + 127.5);
+		selectButtons.Cx = 255;
+		selectButtons.Cy = 255;
+		displayButtons.Cx = (uint8_t) (x + 127.5);
+		displayButtons.Cy = (uint8_t) (y + 127.5);
 	}else{
-		_runButtons.Ax = (uint8_t) (x + 127.5);
-		_runButtons.Ay = (uint8_t) (y + 127.5);
+		selectButtons.Ax = 255;
+		selectButtons.Ay = 255;
+		displayButtons.Ax = (uint8_t) (x + 127.5);
+		displayButtons.Ay = (uint8_t) (y + 127.5);
 	}
 
 	//do nothing if it's not a valid notch to calibrate
@@ -2792,7 +2753,9 @@ void adjustNotch(int currentStepIn, float loopDelta, bool CW, bool CCW, bool res
 	notchAngles[notchIndex] = min(notchAngles[notchIndex], upperLimit);
 }
 //displayNotch is used in lieu of adjustNotch when doing basic calibration
-void displayNotch(const int currentStepIn, const bool calibratingAStick, const float notchAngles[]){
+void displayNotch(const int currentStepIn, const bool calibratingAStick, const float notchAngles[],Buttons &displayButtons, Buttons &selectButtons){
+
+
 	int currentStep = _calOrder[currentStepIn];
 	//display the desired value on the other stick
 	float x = 0;
@@ -2802,17 +2765,21 @@ void displayNotch(const int currentStepIn, const bool calibratingAStick, const f
 		calcStickValues(notchAngles[notchIndex], &x, &y);
 	}
 	if(calibratingAStick){
-		_runButtons.Cx = (uint8_t) (x + 127.5);
-		_runButtons.Cy = (uint8_t) (y + 127.5);
+		selectButtons.Cx = 255;
+		selectButtons.Cy = 255;
+		displayButtons.Cx = (uint8_t) (x + 127.5);
+		displayButtons.Cy = (uint8_t) (y + 127.5);
 	}else{
-		_runButtons.Ax = (uint8_t) (x + 127.5);
-		_runButtons.Ay = (uint8_t) (y + 127.5);
+		selectButtons.Ax = 255;
+		selectButtons.Ay = 255;
+		displayButtons.Ax = (uint8_t) (x + 127.5);
+		displayButtons.Ay = (uint8_t) (y + 127.5);
 	}
 }
 void collectCalPoints(bool aStick, int currentStepIn, float calPointsX[], float calPointsY[]){
 	Serial.print("Collecting cal point for step: ");
 	Serial.println(currentStepIn);
-    const int currentStep = _calOrder[currentStepIn];
+  const int currentStep = _calOrder[currentStepIn];
 
 	Serial.print("Cal point number: ");
 	Serial.println(currentStep);
@@ -3065,41 +3032,51 @@ void recomputeGains(){
     _g.cXSmoothing   = pow(1-_gains.cXSmoothing, timeDivisor);
     _g.cYSmoothing   = pow(1-_gains.cYSmoothing, timeDivisor);
 }
-void runKalman(const float xZ,const float yZ){
+void runKalman(const float xMeasurement,const float yMeasurement, float &xOutput, float &yOutput){
+	//state variables
+	static float xPos = 0;//input of kalman filter
+	static float yPos = 0;//input of kalman filter
+	static float xPosFilt = 0;//output of kalman filter
+	static float yPosFilt = 0;//output of kalman filter
+	static float xVel = 0;
+	static float yVel = 0;
+	static float xVelFilt = 0;
+	static float yVelFilt = 0;
+
 	//Serial.println("Running Kalman");
 
 	//save previous values of state
-	//float _xPos;//input of kalman filter
-	//float _yPos;//input of kalman filter
-	const float oldXPos = _xPos;
-	const float oldYPos = _yPos;
-	//float _xPosFilt;//output of kalman filter
-	//float _yPosFilt;//output of kalman filter
-	const float oldXPosFilt = _xPosFilt;
-	const float oldYPosFilt = _yPosFilt;
-	//float _xVel;
-	//float _yVel;
-	const float oldXVel = _xVel;
-	const float oldYVel = _yVel;
-	//float _xVelFilt;
-	//float _yVelFilt;
-	const float oldXVelFilt = _xVelFilt;
-	const float oldYVelFilt = _yVelFilt;
+	//float xPos;//input of kalman filter
+	//float yPos;//input of kalman filter
+	const float oldXPos = xPos;
+	const float oldYPos = yPos;
+	//float xPosFilt;//output of kalman filter
+	//float yPosFilt;//output of kalman filter
+	const float oldXPosFilt = xPosFilt;
+	const float oldYPosFilt = yPosFilt;
+	//float xVel;
+	//float yVel;
+	const float oldXVel = xVel;
+	const float oldYVel = yVel;
+	//float xVelFilt;
+	//float yVelFilt;
+	const float oldXVelFilt = xVelFilt;
+	const float oldYVelFilt = yVelFilt;
 
 	//compute new (more trivial) state
-	_xPos = xZ;
-	_yPos = yZ;
-	_xVel = _xPos - oldXPos;
-	_yVel = _yPos - oldYPos;
-	const float xVelSmooth = 0.5*(_xVel + oldXVel);
-	const float yVelSmooth = 0.5*(_yVel + oldYVel);
-	const float xAccel = _xVel - oldXVel;
-	const float yAccel = _yVel - oldYVel;
+	xPos = xMeasurement;
+	yPos = yMeasurement;
+	xVel = xPos - oldXPos;
+	yVel = yPos - oldYPos;
+	const float xVelSmooth = 0.5*(xVel + oldXVel);
+	const float yVelSmooth = 0.5*(yVel + oldYVel);
+	const float xAccel = xVel - oldXVel;
+	const float yAccel = yVel - oldYVel;
 	const float oldXPosDiff = oldXPos - oldXPosFilt;
 	const float oldYPosDiff = oldYPos - oldYPosFilt;
 
 	//compute stick position exponents for weights
-	const float stickDistance2 = min(_g.maxStick, _xPos*_xPos + _yPos*_yPos)/_g.maxStick;//0-1
+	const float stickDistance2 = min(_g.maxStick, xPos*xPos + yPos*yPos)/_g.maxStick;//0-1
 	const float stickDistance6 = stickDistance2*stickDistance2*stickDistance2;
 
 	//the current velocity weight for the filtered velocity is the stick r^2
@@ -3131,30 +3108,33 @@ void runKalman(const float xZ,const float yZ){
 
 	//But if we _xSnapback or _ySnapback is zero, we skip the calculation
 	if(_xSnapback != 0){
-		_xVelFilt = velWeight1*_xVel + (1-_g.xVelDecay)*velWeight2*oldXVelFilt + _g.xVelPosFactor*oldXPosDiff;
+		xVelFilt = velWeight1*xVel + (1-_g.xVelDecay)*velWeight2*oldXVelFilt + _g.xVelPosFactor*oldXPosDiff;
 
 		const float xPosWeightVelAcc = 1 - min(1, xVelSmooth*xVelSmooth*_g.velThresh + xAccel*xAccel*_g.accelThresh);
 		const float xPosWeight1 = max(xPosWeightVelAcc, stickDistance6);
 		const float xPosWeight2 = 1-xPosWeight1;
 
-		_xPosFilt = xPosWeight1*_xPos +
-		            xPosWeight2*(oldXPosFilt + (1-_g.xVelDamp)*_xVelFilt);
+		xPosFilt = xPosWeight1*xPos +
+		            xPosWeight2*(oldXPosFilt + (1-_g.xVelDamp)*xVelFilt);
 	} else {
-		_xPosFilt = _xPos;
+		xPosFilt = xPos;
 	}
 
 	if(_ySnapback != 0){
-		_yVelFilt = velWeight1*_yVel + (1-_g.yVelDecay)*velWeight2*oldYVelFilt + _g.yVelPosFactor*oldYPosDiff;
+		yVelFilt = velWeight1*yVel + (1-_g.yVelDecay)*velWeight2*oldYVelFilt + _g.yVelPosFactor*oldYPosDiff;
 
 		const float yPosWeightVelAcc = 1 - min(1, yVelSmooth*yVelSmooth*_g.velThresh + yAccel*yAccel*_g.accelThresh);
 		const float yPosWeight1 = max(yPosWeightVelAcc, stickDistance6);
 		const float yPosWeight2 = 1-yPosWeight1;
 
-		_yPosFilt = yPosWeight1*_yPos +
-		            yPosWeight2*(oldYPosFilt + (1-_g.yVelDamp)*_yVelFilt);
+		yPosFilt = yPosWeight1*yPos +
+		            yPosWeight2*(oldYPosFilt + (1-_g.yVelDamp)*yVelFilt);
 	} else {
-		_yPosFilt = _yPos;
+		yPosFilt = yPos;
 	}
+	
+	xOutput = xPosFilt;
+	yOutput = yPosFilt;
 }
 void print_mtxf(const Eigen::MatrixXf& X){
    int i, j, nrow, ncol;
