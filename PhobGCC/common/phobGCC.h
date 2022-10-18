@@ -1879,6 +1879,9 @@ void readSticks(int readA, int readC, Buttons &btn, Pins &pin, const Buttons &ha
 	float shapedAy = yPosFilt;
 	//Run waveshaping, a secondary filter to extend time at the rim
 	aRunWaveShaping(shapedAx, shapedAy, shapedAx, shapedAy, controls, normGains);
+	if(controls.cyWaveshaping > 0){
+		shapedAy = xPosFilt;
+	}
 
 	//Run a simple low-pass filter
 	static float oldPosAx = 0;
@@ -1923,7 +1926,9 @@ void readSticks(int readA, int readC, Buttons &btn, Pins &pin, const Buttons &ha
 	float remappedAy;
 	float remappedCx;
 	float remappedCy;
-	notchRemap(posAx, posAy, &remappedAx, &remappedAy, _noOfNotches, aStickParams);
+	//notchRemap(posAx, posAy, &remappedAx, &remappedAy, _noOfNotches, aStickParams);
+	remappedAx = posAx;
+	remappedAy = posAy;
 	notchRemap(posCx, posCy, &remappedCx, &remappedCy, _noOfNotches, cStickParams);
 
 	//Clamp values from -125 to +125
