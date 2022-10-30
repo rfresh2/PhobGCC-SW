@@ -281,7 +281,7 @@ void cRunWaveShaping(const float xPos, const float yPos, float &xOut, float &yOu
 	oldYOut = yOut;
 }
 
-void lRunWaveShaping(const float LPos, float &LOut, const ControlConfig &controls, const FilterGains &normGains){
+void lRunWaveShaping(const float LPos, uint8_t &LOut, const ControlConfig &controls, const FilterGains &normGains){
 	volatile static float oldLPos = 0;
 	volatile static float oldLVel = 0;
 
@@ -295,7 +295,7 @@ void lRunWaveShaping(const float LPos, float &LOut, const ControlConfig &control
 	const float oldLPosWeight = fmin(1, LVelSmooth*LVelSmooth*normGains.LTriggerThresh*LFactor);
 	const float newLPosWeight = 1 - oldLPosWeight;
 
-	LOut = oldLOut*oldLPosWeight + LPos*newLPosWeight;
+	LOut = (uint8_t) oldLOut*oldLPosWeight + LPos*newLPosWeight;
 
 	oldLPos = LPos;
 	oldLVel = LVel;
@@ -303,7 +303,7 @@ void lRunWaveShaping(const float LPos, float &LOut, const ControlConfig &control
 
 }
 
-void rRunWaveShaping(const float RPos, float &ROut, const ControlConfig &controls, const FilterGains &normGains){
+void rRunWaveShaping(const float RPos, uint8_t &ROut, const ControlConfig &controls, const FilterGains &normGains){
 	volatile static float oldRPos = 0;
 	volatile static float oldRVel = 0;
 
@@ -317,7 +317,7 @@ void rRunWaveShaping(const float RPos, float &ROut, const ControlConfig &control
 	const float oldRPosWeight = fmin(1, RVelSmooth*RVelSmooth*normGains.RTriggerThresh*RFactor);
 	const float newRPosWeight = 1 - oldRPosWeight;
 
-	ROut = oldROut*oldRPosWeight + RPos*newRPosWeight;
+	ROut = (uint8_t) oldROut*oldRPosWeight + RPos*newRPosWeight;
 
 	oldRPos = RPos;
 	oldRVel = RVel;
