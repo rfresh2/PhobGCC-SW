@@ -65,6 +65,10 @@ void recomputeGains(const FilterGains &gains, FilterGains &normGains){
 	normGains.accelThresh   = 1/(gains.accelThresh * timeFactor);
 	normGains.velThresh     = normGains.velThresh*normGains.velThresh;//square it because it's used squared
 	normGains.accelThresh   = normGains.accelThresh*normGains.accelThresh;
+	normGains.LTriggerThresh = 1/(gains.LTriggerThresh * timeFactor);
+	normGains.RTriggerThresh = 1/(gains.RTriggerThresh * timeFactor);
+	normGains.LTriggerThresh = normGains.LTriggerThresh*normGains.LTriggerThresh;
+	normGains.RTriggerThresh = normGains.RTriggerThresh*normGains.RTriggerThresh;
 	normGains.xSmoothing    = pow(1-gains.xSmoothing, timeDivisor);
 	normGains.ySmoothing    = pow(1-gains.ySmoothing, timeDivisor);
 	normGains.cXSmoothing   = pow(1-gains.cXSmoothing, timeDivisor);
@@ -175,6 +179,14 @@ float calcWaveshapeMult(const int setting){
 	}
 }
 
+float calcTriggerWaveshapeMult(const int setting){
+	if (setting >= 199){
+		return calcWaveshapeMult(15);
+	} else {
+		return calcWaveshapeMult((int) ((setting - 49) / 10));
+	}
+}
+
 //This simulates an idealized sort of pode:
 // if the stick is moving fast, it responds poorly, while
 // if the stick is moving slowly, it follows closely.
@@ -267,6 +279,49 @@ void cRunWaveShaping(const float xPos, const float yPos, float &xOut, float &yOu
 
 	oldXOut = xOut;
 	oldYOut = yOut;
+}
+
+void lRunWaveShaping(const float LPos, float &LOut, const ControlConfig &controls, const FilterGains &normGains){
+	volatile static float oldLPos = 0;
+	volatile static float oldLVel = 0;
+
+	volatile static float oldLOut = 0;
+
+	const float LVel = LPos - oldLPos;
+	const float LVelSmooth = 0.5*(LVel + oldLVel);
+
+	const float LFactor = calcTriggerWaveshapeMult(controls.lTriggerOffset);
+
+	const float oldLPosWeight = fmin(1, LVelSmooth*LVelSmooth*normGains.LTriggerThresh*LFactor);
+	const float newLPosWeight = 1 - oldLPosWeight;
+
+	LOut = oldLOut*oldLPosWeight + LPos*newLPosWeight;
+
+	oldLPos = LPos;
+	oldLVel = LVel;
+	oldLOut = LOut;
+
+}
+
+void rRunWaveShaping(const float RPos, float &ROut, const ControlConfig &controls, const FilterGains &normGains){
+	volatile static float oldRPos = 0;
+	volatile static float oldRVel = 0;
+
+	volatile static float oldROut = 0;
+
+	const float RVel = RPos - oldRPos;
+	const float RVelSmooth = 0.5*(RVel + oldRVel);
+
+	const float RFactor = calcTriggerWaveshapeMult(controls.rTriggerOffset);
+
+	const float oldRPosWeight = fmin(1, RVelSmooth*RVelSmooth*normGains.RTriggerThresh*RFactor);
+	const float newRPosWeight = 1 - oldRPosWeight;
+
+	ROut = oldROut*oldRPosWeight + RPos*newRPosWeight;
+
+	oldRPos = RPos;
+	oldRVel = RVel;
+	oldROut = ROut;
 }
 
 #endif //FILTER_H

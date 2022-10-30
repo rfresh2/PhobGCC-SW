@@ -38,7 +38,7 @@ ControlConfig _controls{
 	.lConfig = 0,
 	.rConfig = 0,
 	.triggerConfigMin = 0,
-	.triggerConfigMax = 6,
+	.triggerConfigMax = 7,
 	.triggerDefault = 0,
 	.lTriggerOffset = 49,
 	.rTriggerOffset = 49,
@@ -91,6 +91,8 @@ FilterGains _gains {//these values are for 800 hz, recomputeGains converts them 
 	.yVelDamp = 0.125,
 	.velThresh = 1.00,
 	.accelThresh = 3.00,
+	.LTriggerThresh = 1.00,
+	.RTriggerThresh = 1.00,
 	.xSmoothing = 0.0,
 	.ySmoothing = 0.0,
 	.cXSmoothing = 0.0,
@@ -1465,6 +1467,14 @@ void processButtons(Pins &pin, Buttons &btn, Buttons &hardware, ControlConfig &c
 					tempBtn.La = (uint8_t) readLa(pin, controls.lTrigInitial, triggerScaleL) * shutoffLa;
 				}
 				break;
+			case 7: //ADT trigger Mode
+				if(lockoutL){
+					tempBtn.L  = (uint8_t) 0;
+					tempBtn.La = (uint8_t) 0;
+				} else {
+					tempBtn.La = (uint8_t) readLa(pin, controls.lTrigInitial, 1) * shutoffLa;
+				}
+				break;
 			default:
 				if(lockoutL){
 					tempBtn.L  = (uint8_t) 0;
@@ -1527,6 +1537,14 @@ void processButtons(Pins &pin, Buttons &btn, Buttons &hardware, ControlConfig &c
 					tempBtn.Ra = (uint8_t) 0;
 				} else {
 					tempBtn.Ra = (uint8_t) readRa(pin, controls.rTrigInitial, triggerScaleR) * shutoffRa;
+				}
+				break;
+			case 7: //ADT Trigger Mode
+				if(lockoutR){
+					tempBtn.R  = (uint8_t) 0;
+					tempBtn.Ra = (uint8_t) 0;
+				} else {
+					tempBtn.Ra = (uint8_t) readRa(pin, controls.rTrigInitial, 1) * shutoffRa;
 				}
 				break;
 			default:

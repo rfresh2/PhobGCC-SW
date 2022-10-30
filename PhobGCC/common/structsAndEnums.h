@@ -219,6 +219,8 @@ struct FilterGains {
 	//  the thresholds.
 	float velThresh;//1 default for 1.2ms timesteps, larger for bigger timesteps
 	float accelThresh;//5 default for 1.2ms timesteps, larger for bigger timesteps
+	float LTriggerThresh;
+	float RTriggerThresh;
 	//This just applies a low-pass filter.
 	//The purpose is to provide delay for single-axis ledgedashes.
 	//Must be between 0 and 1. Larger = more smoothing and delay.
