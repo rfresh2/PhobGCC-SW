@@ -1480,7 +1480,9 @@ void processButtons(Pins &pin, Buttons &btn, Buttons &hardware, ControlConfig &c
 					tempBtn.L  = (uint8_t) 0;
 					tempBtn.La = (uint8_t) 0;
 				} else {
-					lRunWaveShaping(readLa(pin, controls.lTrigInitial, 1), tempBtn.La, controls, normGains);
+					uint8_t shapedLa;
+					lRunWaveShaping(readLa(pin, controls.lTrigInitial, 1), shapedLa, controls, normGains);
+					tempBtn.La = shapedLa;
 				}
 		}
 
@@ -1552,7 +1554,9 @@ void processButtons(Pins &pin, Buttons &btn, Buttons &hardware, ControlConfig &c
 					tempBtn.R  = (uint8_t) 0;
 					tempBtn.Ra = (uint8_t) 0;
 				} else {
-					rRunWaveShaping(readRa(pin, controls.rTrigInitial, 1), tempBtn.Ra, controls, normGains);
+					uint8_t shapedRa;
+					rRunWaveShaping(readRa(pin, controls.rTrigInitial, 1), shapedRa, controls, normGains);
+					tempBtn.Ra = shapedRa;
 				}
 		}
 	}
