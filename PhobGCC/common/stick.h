@@ -183,6 +183,10 @@ void notchRemap(const float xIn, const float yIn, float* xOut, float* yOut, cons
 			*xOut = 0;
 			*yOut = 0;
 		}
+		// uptilt snap
+		if (abs(*xOut) < 28 && *yOut >= 13 && *yOut <= 51) {
+			*yOut = 51;
+		}
 	}
 };
 
