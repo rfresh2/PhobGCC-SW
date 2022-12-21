@@ -8,12 +8,11 @@ namespace utiltsnap {
 
 	ExtrasSlot extrasUtiltConfigSlot = EXTRAS_UNSET;
 
-	enum UtiltSettings{
+	enum UtiltSettings{ // this is limited to 4 setting slots (including toggle)
 		UTILT_SETTING_ENABLE,
-		UTILT_SETTING_MIN_AY, // todo: have settings able to be configured
-		UTILT_SETTING_MAX_AY,
-		UTILT_SETTING_AX_RANGE,
-		UTILT_SETTING_SNAP_AY
+		UTILT_SETTING_UNSET1, // todo: have settings able to be configured
+		UTILT_SETTING_UNSET2,
+		UTILT_SETTING_UNSET3
 	};
 
 	enum UtiltSettingEnable{
@@ -27,13 +26,16 @@ namespace utiltsnap {
 			return;
 		}
 
-		if (abs(*Ax) <= 28 && *Ay >= 13 && *Ay <= 52) {
+		// We're trying to hit the green color on https://i.imgur.com/s1owyUY.png
+		if (abs(*Ax) <= 30 && *Ay >= 13 && *Ay <= 52) {
 			*Ay = max(*Ay, 28);
-			if (*Ax >= 15) {
-				*Ax = max(*Ax, 23);
+			// snap x for turnaround tilts
+			// we want to hit the green triangles on the side from above image
+			if (*Ax >= 13) { // expands out to x = 30
+				*Ax = 23;
 			}
-			if (*Ax <= -15) {
-				*Ax = min(*Ax, -23);
+			if (*Ax <= -13) { // expands out to x = -30
+				*Ax = -23;
 			}
 		}
 
