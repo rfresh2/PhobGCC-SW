@@ -13,11 +13,11 @@ namespace utiltsnap {
 		UTILT_SETTING_MIN_AY, // todo: have settings able to be configured
 		UTILT_SETTING_MAX_AY,
 		UTILT_SETTING_AX_RANGE,
-        UTILT_SETTING_SNAP_AY
+		UTILT_SETTING_SNAP_AY
 	};
 
 	enum UtiltSettingEnable{
-        UTILT_ENABLED,
+		UTILT_ENABLED,
 		UTILT_DISABLED
 	};
 
@@ -37,7 +37,7 @@ namespace utiltsnap {
 			}
 		}
 
-        return;
+		return;
 	}
 
 	bool toggle(IntOrFloat config[]) {
