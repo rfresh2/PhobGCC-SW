@@ -9,10 +9,14 @@
  */
 //------------------------------------------------------
 //#define EXTRAS_ESS
+#define EXTRAS_UTILTSNAP
 //------------------------------------------------------
 
 #ifdef EXTRAS_ESS
 #include "ess.h"
+#endif
+#ifdef EXTRAS_UTILTSNAP
+#include "utiltSnap.h"
 #endif
 
 typedef bool(*ExtrasToggleFn)(IntOrFloat config[]);//Used for toggling extras
@@ -86,6 +90,13 @@ void extrasInit() {
 	Serial.println("Extra: Enabling ESS functionality...");
 #endif //ARDUINO
 	extrasConfigAssign(ess::extrasEssConfigSlot, ess::toggle, NULL);
+#endif
+#ifdef EXTRAS_UTILTSNAP
+	utiltsnap::extrasUtiltConfigSlot = EXTRAS_UP;
+#ifdef ARDUINO
+	Serial.println("Extra: Enabling utilt snap functionality...");
+#endif //ARDUINO
+	extrasConfigAssign(utiltsnap::extrasUtiltConfigSlot, utiltsnap::toggle, NULL);
 #endif
 
 }
