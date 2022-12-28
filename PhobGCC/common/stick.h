@@ -183,6 +183,11 @@ void notchRemap(const float xIn, const float yIn, float* xOut, float* yOut, cons
 			*xOut = 0;
 			*yOut = 0;
 		}
+	} else if (currentCalStep == 69) {
+		if((abs(*xOut)<3) && (abs(*yOut)<3)) {
+			*xOut = 0;
+			*yOut = 0;
+		}
 	}
 };
 

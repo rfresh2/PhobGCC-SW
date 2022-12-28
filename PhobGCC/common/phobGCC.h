@@ -2228,12 +2228,19 @@ void readSticks(int readA, int readC, Buttons &btn, Pins &pin, RawStick &raw, co
 	float remappedAyUnfiltered;
 	float remappedCxUnfiltered;
 	float remappedCyUnfiltered;
+#ifdef EXTRAS_RFRESH
+	notchRemap(posAx, posAy, &remappedAx, &remappedAy, _noOfNotches, aStickParams, 69);
+#else
 	notchRemap(posAx, posAy, &remappedAx, &remappedAy, _noOfNotches, aStickParams, currentCalStep);
+#endif
 	notchRemap(posCx, posCy, &remappedCx, &remappedCy, _noOfNotches, cStickParams, currentCalStep);
 	notchRemap(_raw.axLinearized, _raw.ayLinearized, &remappedAxUnfiltered, &remappedAyUnfiltered, _noOfNotches, aStickParams, 1);//no snapping
 	notchRemap(_raw.cxLinearized, _raw.cyLinearized, &remappedCxUnfiltered, &remappedCyUnfiltered, _noOfNotches, cStickParams, 1);//no snapping
 #ifdef EXTRAS_UTILTSNAP
 	utiltsnap::remap(&remappedAx, &remappedAy, controls.extras[utiltsnap::extrasUtiltConfigSlot].config);
+#endif
+#ifdef EXTRAS_RFRESH
+	rfresh::remap(&remappedAx, &remappedAy, controls.extras[rfresh::extrasRfreshConfigSlot].config);
 #endif
 
 	//Clamp values from -125 to +125
