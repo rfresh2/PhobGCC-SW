@@ -9,7 +9,8 @@
  */
 //------------------------------------------------------
 //#define EXTRAS_ESS
-#define EXTRAS_UTILTSNAP
+// #define EXTRAS_UTILTSNAP
+#define EXTRAS_RFRESH
 //------------------------------------------------------
 
 #ifdef EXTRAS_ESS
@@ -17,6 +18,9 @@
 #endif
 #ifdef EXTRAS_UTILTSNAP
 #include "utiltSnap.h"
+#endif
+#ifdef EXTRAS_RFRESH
+#include "rfresh.h"
 #endif
 
 typedef bool(*ExtrasToggleFn)(IntOrFloat config[]);//Used for toggling extras
@@ -97,6 +101,13 @@ void extrasInit() {
 	Serial.println("Extra: Enabling utilt snap functionality...");
 #endif //ARDUINO
 	extrasConfigAssign(utiltsnap::extrasUtiltConfigSlot, utiltsnap::toggle, NULL);
+#endif
+#ifdef EXTRAS_RFRESH
+	rfresh::extrasRfreshConfigSlot = EXTRAS_DOWN;
+#ifdef ARDUINO
+	Serial.println("Extra: Enabling rfresh's phob functionality...");
+#endif //ARDUINO
+	extrasConfigAssign(rfresh::extrasRfreshConfigSlot, rfresh::toggle, NULL);
 #endif
 
 }
