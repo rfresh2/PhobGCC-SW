@@ -109,8 +109,8 @@ namespace rfresh {
 		// if (config[RFRESH_SETTING_ENABLE].intValue != RFRESH_ENABLED) {
 		// 	return;
 		// }
-        rfresh::cardinals(Ax, Ay, config);
-        rfresh::perfectAngles(Ax, Ay, config);
+        // rfresh::cardinals(Ax, Ay, config);
+        // rfresh::perfectAngles(Ax, Ay, config);
         rfresh::uptiltSnap(Ax, Ay, config);
         rfresh::shieldDrop(Ax, Ay, config);
 
