@@ -92,7 +92,7 @@ namespace rfresh {
     void uptiltSnap(float* Ax, float* Ay, const IntOrFloat config[]){
         // We're trying to hit the green color on https://i.imgur.com/s1owyUY.png
 		if (abs(*Ax) <= 30 && *Ay >= 13 && *Ay <= 52) {
-			*Ay = max(*Ay, 28);
+			*Ay = max(*Ay, 28.0f);
 			// snap x for turnaround tilts
 			// we want to hit the green triangles on the side from above image
 			if (*Ax >= 13) { // expands out to x = 30

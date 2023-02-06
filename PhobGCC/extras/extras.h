@@ -16,9 +16,6 @@
 #ifdef EXTRAS_ESS
 #include "ess.h"
 #endif
-#ifdef EXTRAS_UTILTSNAP
-#include "utiltSnap.h"
-#endif
 #ifdef EXTRAS_RFRESH
 #include "rfresh.h"
 #endif
@@ -94,13 +91,6 @@ void extrasInit() {
 	Serial.println("Extra: Enabling ESS functionality...");
 #endif //ARDUINO
 	extrasConfigAssign(ess::extrasEssConfigSlot, ess::toggle, NULL);
-#endif
-#ifdef EXTRAS_UTILTSNAP
-	utiltsnap::extrasUtiltConfigSlot = EXTRAS_UP;
-#ifdef ARDUINO
-	Serial.println("Extra: Enabling utilt snap functionality...");
-#endif //ARDUINO
-	extrasConfigAssign(utiltsnap::extrasUtiltConfigSlot, utiltsnap::toggle, NULL);
 #endif
 #ifdef EXTRAS_RFRESH
 	rfresh::extrasRfreshConfigSlot = EXTRAS_DOWN;
